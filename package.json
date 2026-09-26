@@ -1,0 +1,25 @@
+{
+  "name": "file-tool",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "description": "让网页聊天（ChatGPT/Claude/DeepSeek 等）通过 CDP 读取本地文件、目录结构并运行测试文件——零扩展，Playwright 驱动专用浏览器实例",
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\"",
+    "smoke": "node scripts/smoke.mjs",
+    "demo": "node scripts/smoke.mjs",
+    "smoke:chat": "node scripts/smoke-chat.mjs",
+    "smoke:watch": "node scripts/smoke-watch.mjs",
+    "smoke:console": "node scripts/smoke-console.mjs",
+    "smoke:profile": "node scripts/smoke-profile-lock.mjs",
+    "console": "node src/cli.mjs console",
+    "setup": "node src/cli.mjs setup",
+    "ask": "node src/cli.mjs ask"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}

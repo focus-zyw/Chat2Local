@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>file-tool · 本地控制台</title>
+  <link rel="stylesheet" href="/control.css">
+  <script src="/control.js" type="module"></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="masthead">
+      <div class="brand-mark" aria-hidden="true">f<span>t</span></div>
+      <div>
+        <p class="eyebrow">本地控制台</p>
+        <h1>让网页导师读懂你的项目</h1>
+      </div>
+      <div class="privacy">仅在这台电脑上运行</div>
+    </header>
+
+    <main>
+      <div class="intro">
+        <p class="eyebrow">旁观执行 · WATCH</p>
+        <p>你继续在专用浏览器里聊天。这里负责启动、暂停和查看本地动作。</p>
+      </div>
+
+      <div class="grid">
+        <section class="card setup" aria-labelledby="setup-title">
+          <div class="section-head"><span class="step">01</span><h2 id="setup-title">选择会话</h2></div>
+          <label for="root">资料目录 <small>网页助手仅能访问此目录内的文件</small></label>
+          <div class="browse-row">
+            <input id="root" type="text" autocomplete="off" spellcheck="false" placeholder="例如 D:\my-project">
+            <button id="browse" type="button">浏览…</button>
+          </div>
+          <label for="site">聊天网站</label>
+          <select id="site"></select>
+          <label for="role">任务角色</label>
+          <select id="role"></select>
+          <p id="thread-status" class="thread-status" aria-live="polite">正在检查历史聊天登记…</p>
+          <div class="actions">
+            <button id="start" class="primary" type="button">启动旁观执行 <span aria-hidden="true">↗</span></button>
+            <button id="pause" type="button" disabled>暂停</button>
+            <button id="resume" type="button" disabled>继续</button>
+            <button id="confirm-recovery" type="button" hidden>已核对，继续旁观（不重试上次动作）</button>
+            <button id="stop" class="quiet" type="button" disabled>结束会话</button>
+          </div>
+          <details class="restore">
+            <summary>找回以前的聊天</summary>
+            <p>在所选网站的历史列表中打开原聊天，复制浏览器地址栏的链接，粘贴到这里并绑定到当前项目。地址只保存在本机。</p>
+            <label for="thread-url">旧聊天地址</label>
+            <div class="bind-row">
+              <input id="thread-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://…">
+              <button id="bind-thread" type="button">绑定旧聊天</button>
+            </div>
+          </details>
+          <p class="hint">暂停会保留浏览器和当前聊天；重启后选择同一网站和项目，再点击启动可续接上次聊天。旧聊天无法打开时会提示，不会悄悄新建。</p>
+        </section>
+
+        <section class="card session" aria-labelledby="session-title">
+          <div class="section-head"><span class="step">02</span><h2 id="session-title">会话状态</h2></div>
+          <div class="state" id="state" aria-live="polite"><span class="state-dot"></span><span id="state-text">正在连接…</span></div>
+          <dl class="details">
+            <div><dt>网站</dt><dd id="active-site">—</dd></div>
+            <div><dt>项目目录</dt><dd id="active-root">—</dd></div>
+            <div><dt>任务角色</dt><dd id="active-role">—</dd></div>
+            <div><dt>浏览器</dt><dd id="active-browser">—</dd></div>
+            <div><dt>网页连接</dt><dd id="health-text" data-health="stopped">已停止 · 专用浏览器未运行</dd></div>
+          </dl>
+          <div class="note"><span class="note-icon" aria-hidden="true">↗</span><p>请在标题带「〔file-tool〕」的专用浏览器窗口聊天。控制台不会读取你的登录信息。</p></div>
+          <p id="error" class="error" role="alert" hidden></p>
+        </section>
+      </div>
+
+      <section class="card activity" aria-labelledby="activity-title">
+        <div class="section-head"><span class="step">03</span><h2 id="activity-title">最近活动</h2><span class="live-mark">实时更新</span></div>
+        <ol id="events" class="events"><li class="empty">启动后，这里会显示动作、回填和诊断信息。</li></ol>
+      </section>
+    </main>
+
+    <footer>file-tool 只提供 read / ls / search / run 能力 · Host Root 始终是边界</footer>
+  </div>
+
+  <dialog id="browse-dialog" aria-labelledby="browse-title">
+    <div class="browse-head">
+      <strong id="browse-title">选择文件夹</strong>
+      <code id="browse-path">此电脑</code>
+    </div>
+    <div class="browse-toolbar">
+      <button id="browse-up" type="button">↑ 上级</button>
+      <button id="browse-refresh" type="button">刷新</button>
+    </div>
+    <ul id="browse-list"></ul>
+    <p id="browse-error" class="error" hidden></p>
+    <div class="browse-foot">
+      <button id="browse-cancel" type="button" class="quiet">取消</button>
+      <button id="browse-pick" type="button" class="primary">选择此目录</button>
+    </div>
+  </dialog>
+</body>
+</html>

@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Mock Chat</title>
+<style>
+  body { font-family: sans-serif; max-width: 720px; margin: 24px auto; }
+  .bubble { padding: 8px 12px; border-radius: 8px; margin: 8px 0; white-space: pre-wrap; }
+  .bubble.user { background: #e3f2fd; }
+  .bubble.assistant { background: #f1f1f1; }
+  #stop { display: none; }
+  body.generating #stop { display: inline-block; }
+  pre { background: #222; color: #eee; padding: 6px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <h1>Mock Chat（file-tool 自测）</h1>
+  <div id="log"></div>
+  <button id="stop">停止</button>
+  <form id="f">
+    <textarea id="composer" rows="4" style="width:100%"></textarea>
+    <button id="send" type="submit">发送</button>
+  </form>
+<script>
+  const FENCE = "```";
+  const log = document.getElementById("log");
+  let turns = 0;
+  let tutor = false; // chat 模式：收到导师开场白后置位，走教学剧本
+  let diagnose = false; // 排障冒烟：按证据链依次 search、read、run
+  let textRole = false; // 文本目录问答：搜索笔记并引用行号
+  let textTask = false;
+
+  function addBubble(cls, text) {
+    const b = document.createElement("div");
+    b.className = "bubble " + cls;
+    const md = document.createElement("div");
+    md.className = "md-body";
+    // 用 <pre><code class="language-xxx"> 渲染围栏，验证页面端 pre→围栏重建
+    const parts = text.split(FENCE);
+    md.appendChild(document.createTextNode(parts[0] || ""));
+    for (let i = 1; i + 1 < parts.length; i += 2) {
+      const nl = parts[i].indexOf("\n");
+      const lang = nl === -1 ? parts[i] : parts[i].slice(0, nl);
+      const body = nl === -1 ? "" : parts[i].slice(nl + 1);
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      if (lang) code.className = "language-" + lang;
+      code.textContent = body;
+      pre.appendChild(code);
+      md.appendChild(pre);
+      if (parts[i + 1]) md.appendChild(document.createTextNode(parts[i + 1]));
+    }
+    b.appendChild(md);
+    log.appendChild(b);
+    return b;
+  }
+
+  function replyFor(incoming) {
+    if (incoming.includes("文本目录问答助手")) {
+      textRole = true;
+      textTask = incoming.includes("任务：");
+      return "先搜索相关笔记。\n" + FENCE + "host\n" +
+        JSON.stringify([{ op: "search", path: "notes", pattern: "审批时限" }]) + "\n" + FENCE;
+    }
+    if (textRole && /\[1\] search notes /.test(incoming)) {
+      return "读取命中位置的上下文。\n" + FENCE + "host\n" +
+        JSON.stringify([{ op: "read", path: "notes/guide.md", line: 1, lines: 3 }]) + "\n" + FENCE;
+    }
+    if (textRole && /\[1\] read notes\/guide\.md/.test(incoming)) {
+      const answer = /审批时限：3天/.test(incoming)
+        ? "审批时限为 3 天，依据 notes/guide.md:1。"
+        : "当前材料不足，无法确认审批时限。";
+      return textTask ? FENCE + "done\n" + answer + "\n" + FENCE : answer;
+    }
+    if (textRole) return "依据 notes/guide.md:1，审批时限为 3 天。";
+    if (incoming.includes("故障排查任务")) {
+      diagnose = true;
+      return "先搜索失败条件。\n" + FENCE + "host\n" +
+        JSON.stringify([{ op: "search", path: "src", pattern: "enabled" }]) + "\n" + FENCE;
+    }
+    if (diagnose && /\[1\] search src /.test(incoming)) {
+      return "已定位条件，读取对应行并运行已有测试。\n" + FENCE + "host\n" +
+        JSON.stringify([
+          { op: "read", path: "src/bug.js", line: 1, lines: 3 },
+          { op: "run", path: "tests/bug.test.js" },
+        ]) + "\n" + FENCE;
+    }
+    if (diagnose && /\[1\] read src\/bug\.js/.test(incoming)) {
+      const found = /enabled = false/.test(incoming);
+      const failed = /\[2\] run tests\/bug\.test\.js → 失败\(exit 1\)/.test(incoming);
+      return FENCE + "done\n现象：测试失败。定位证据：src/bug.js:1 的 enabled 为 false。" +
+        "测试及结果：tests/bug.test.js 退出码 " + (failed ? "1" : "未知") +
+        "。原因判断：" + (found && failed ? "已验证配置值与测试预期不一致" : "证据不足") +
+        "。下一步：检查设置 enabled 的业务预期。\n" + FENCE;
+    }
+    // ── watch 冒烟：收到工具自动回填的结果 → 讲解（无动作）──
+    if (incoming.includes("[file-tool 自动回填")) {
+      return "WATCHER-FEED-OK 收到回填结果，讲解如下：项目结构一目了然。";
+    }
+    // ── chat（导师）剧本：开场白 → ls → 讲解；后续提问回纯讲解 ──
+    if (incoming.includes("代码导师")) {
+      tutor = true;
+      return "好的，我先看一下目录结构。\n" + FENCE + "host\n" +
+        JSON.stringify([{ op: "ls", path: ".", recursive: true }]) + "\n" + FENCE;
+    }
+    if (tutor) {
+      if (/\[1\] ls /.test(incoming)) {
+        const files = (incoming.match(/[a-z0-9_.-]+\.(js|json)/gi) || []).slice(0, 3).join("、");
+        return "导师讲解：这个项目的核心文件是 " + files + "，建议从 package.json 读起。";
+      }
+      return "导师讲解：关于「" + incoming.slice(0, 30) + "」，建议先看 package.json 再看 src/。";
+    }
+    // ── 任务剧本 ──
+    if (incoming.includes(FENCE + "host") && turns === 1) {
+      return "好的，我先看目录结构。\n" + FENCE + "host\n" +
+        JSON.stringify([{ op: "ls", path: ".", recursive: true }]) + "\n" + FENCE;
+    }
+    if (/\[1\] ls /.test(incoming)) {
+      return "目录里有 package.json 和测试，我再读配置并跑测试。\n" + FENCE + "host\n" +
+        JSON.stringify([
+          { op: "read", path: "package.json" },
+          { op: "run", path: "tests/smoke.test.js", args: [] },
+        ]) + "\n" + FENCE;
+    }
+    if (/\[1\] read package\.json/.test(incoming)) {
+      const name = (incoming.match(/"name"\s*:\s*"([^"]+)"/) || [])[1] || "未知";
+      const ranOk = /SMOKE-TEST-PASSED/.test(incoming);
+      return FENCE + "done\n自测完成：ls 与 read 正常，读到的包名是 " + name +
+        "；测试运行" + (ranOk ? "通过（SMOKE-TEST-PASSED）" : "未见通过标记") + "。\n" + FENCE;
+    }
+    return FENCE + "done\nmock 脚本走完了。\n" + FENCE;
+  }
+
+  document.getElementById("f").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const box = document.getElementById("composer");
+    const text = box.value;
+    if (!text.trim()) return;
+    box.value = "";
+    addBubble("user", text);
+    turns++;
+    // 模拟生成中：stop 按钮出现 + 流式追加
+    document.body.classList.add("generating");
+    const b = addBubble("assistant", "");
+    const mdBody = b.querySelector(".md-body");
+    const full = replyFor(text);
+    for (let i = 0; i < full.length; i += 60) {
+      mdBody.textContent = full.slice(0, i + 60);
+      await new Promise((r) => setTimeout(r, 60));
+    }
+    mdBody.textContent = full;
+    await new Promise((r) => setTimeout(r, 400));
+    document.body.classList.remove("generating");
+  });
+
+  // ?auto=1：模拟用户已直接在网页上提问，assistant 回复带 host 动作块
+  //（watch 冒烟用——验证旁观执行器能发现并回填）
+  if (location.search.includes("auto")) {
+    setTimeout(() => {
+      addBubble("user", "（用户在网页上问：这个项目是干嘛的？）");
+      turns++;
+      const b = addBubble("assistant", "");
+      b.querySelector(".md-body").textContent =
+        "我需要先看下目录结构。\n" + FENCE + "host\n" +
+        JSON.stringify([{ op: "ls", path: "." }]) + "\n" + FENCE;
+    }, 600);
+  }
+
+  // ?broken=<类型>：模拟站点改版后的脱敏故障样本（诊断回归用）
+  //   composer → 输入框选择器未命中（回复区正常）
+  //   hidden   → 输入框存在但不可见（visibility:hidden）
+  // 两种变体都先铺一根可见的 assistant 气泡，让"回复区正常"成立，
+  // 从而精确命中各自的细分原因。
+  if (location.search.includes("broken")) {
+    const kind = new URLSearchParams(location.search).get("broken");
+    addBubble("assistant", "（示例回复：回复区结构正常）");
+    if (kind === "composer") document.getElementById("composer").id = "composer-renamed";
+    if (kind === "hidden") document.getElementById("composer").style.visibility = "hidden";
+  }
+</script>
+</body>
+</html>
