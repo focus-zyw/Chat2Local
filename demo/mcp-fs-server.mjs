@@ -369,10 +369,14 @@ async function createDirectoryTool(args) {
   return { text: `已创建目录 ${display(t.root, t.rel)}` };
 }
 
-async function undoWriteTool() {
+async function undoWriteTool(args) {
   const rec = undoStack[undoStack.length - 1];
   if (!rec) {
     return { isError: true, text: "没有可撤销的写入（本会话尚未成功写入，或已全部撤销）" };
+  }
+  // dryRun 纯预览：只报告将撤销哪一笔，不弹栈、不改动任何文件
+  if (args?.dryRun === true) {
+    return { text: `风险: 覆盖已有内容\n（将撤销最近一笔写入，未执行：${rec.describe}）` };
   }
   try {
     if (rec.kind === "file") {
@@ -467,8 +471,13 @@ const TOOLS = [
   },
   {
     name: "undo_write",
-    description: "撤销本会话最近一次成功的 write_file/create_directory（写入类，host 侧审批模式约束）：覆盖型恢复原内容，新建型删除文件；逐笔回退，不能跨越。",
-    schema: { type: "object", properties: {} },
+    description: "撤销本会话最近一次成功的 write_file/create_directory（写入类，host 侧审批模式约束）：覆盖型恢复原内容，新建型删除文件；逐笔回退，不能跨越。dryRun:true 只预览将撤销哪一笔，不执行。",
+    schema: {
+      type: "object",
+      properties: {
+        dryRun: { type: "boolean", description: "只预览将撤销哪一笔，不执行（默认 false）" },
+      },
+    },
     run: undoWriteTool,
   },
 ];

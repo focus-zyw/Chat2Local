@@ -231,7 +231,7 @@ node src/cli.mjs watch deepseek --root D:\my-project --role task `
 - 输出每文件一行（如 `src/foo.mjs: L3 fn alpha ×3 · L7 class Widget · L11 method run(Widget)`），被引用最多的文件排在预算前列（`×N` 为全库标识符出现次数，含声明）；预算默认 4000 字符（`maxChars` 可调，500–7000），超出截断并提示。
 - 支持 `.js/.mjs/.cjs/.ts/.tsx/.jsx/.py`；行级启发式抽取可能有个别误报/漏报，行号以 `read` 实读为准。敏感路径与依赖/构建目录不进地图；请求路径与真实路径双重核对（P56 fs server 同款纪律），目录联接/符号链接不跟随遍历；授权根启动时 realpath 冻结、越界拒绝，与其他自带 server 同一套边界。
 
-**写入与分级审批（P60 立门、P61 分级）**。自带过滤版文件 server 提供 `write_file`（`dryRun:true` 返回风险分级与新旧内容 diff，不落盘；覆盖已有文件自动留 `.bak` 备份）、`create_directory`（幂等，支持 dryRun）和 `undo_write`（逐笔撤销本会话写入）。`write_file` / `create_directory` 受**双层门**约束：
+**写入与分级审批（P60 立门、P61 分级）**。自带过滤版文件 server 提供 `write_file`（`dryRun:true` 返回风险分级与新旧内容 diff，不落盘；覆盖已有文件自动留 `.bak` 备份）、`create_directory`（幂等，支持 dryRun）和 `undo_write`（逐笔撤销本会话写入，`dryRun:true` 只预览将撤销哪一笔）。`write_file` / `create_directory` / `undo_write` 受**双层门**约束：
 
 - **server 层**（所有审批模式下强制）：拒敏感路径、越界、符号链接与二进制覆盖，单次写入上限 1 MB；
 - **host 层**（Codex 式审批模式，`写入模式` 命令切换，仅本次 watch 会话有效）：
@@ -251,7 +251,7 @@ node src/cli.mjs watch deepseek --root D:\my-project --role task `
 # 终端 撤销写入 逐笔回退（覆盖型恢复原内容、新建型删除）；写入模式 命令随时切换审批级别
 ```
 
-沙箱边界（授权根、敏感路径、越界、符号链接）**不随审批模式放宽**——Codex 的"完全访问"在这里等价于自动批准，这是刻意差异。建议配套使用自带 git server：写入后用 `git_diff_unstaged` 审查模型改了什么。当前 `undo_write` 尚未进入 host 写入名称清单：终端「撤销写入」可用，但网页模型若获该工具的目录授权，其调用不会经过审批；修复前请用 `--mcp-allow` 排除该工具。接入**外部** server 的写入工具前，还须核实其 `dryRun` 是否真的不产生副作用；当前 host 无法验证这一点。
+沙箱边界（授权根、敏感路径、越界、符号链接）**不随审批模式放宽**——Codex 的"完全访问"在这里等价于自动批准，这是刻意差异。建议配套使用自带 git server：写入后用 `git_diff_unstaged` 审查模型改了什么。`undo_write` 同样经过审批（逐笔询问默认展示将撤销哪一笔）；不希望模型撤销时，用 `--mcp-allow` 排除该工具即可（终端「撤销写入」不受影响）。接入**外部** server 的写入工具前，还须核实其 `dryRun` 是否真的不产生副作用；当前 host 无法验证这一点。
 
 **首个正式有状态场景：浏览器网页检查（@playwright/mcp，`--role task`）**。让网页模型在本地测试页面上连续执行"打开 → 操作 → 检查 → 暂停恢复后继续"，接入要点：
 

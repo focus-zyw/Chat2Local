@@ -200,6 +200,8 @@ export async function runAction(msg, root, ctx = {}) {
 const MCP_WRITE_TOOLS = new Set([
   "write_file", "edit_file", "create_directory", "move_file",
   "write", "edit", "create", "mkdir", "mv", "patch", "apply_patch",
+  // 撤销写入同样是副作用操作（恢复旧内容/删除新建文件），与写入同受门控
+  "undo_write", "undo",
 ]);
 
 export function isMcpWriteTool(toolName) {

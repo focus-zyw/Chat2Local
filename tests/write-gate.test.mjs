@@ -161,3 +161,39 @@ test("写入门控 create_directory：dryRun 风险分级 + undo 非空目录拒
   assert.match(undo.text, /非空|撤销失败/);
   assert.ok(await fs.stat(path.join(h.root, "sub", "dir")).then(() => true, () => false));
 });
+
+test("写入门控 undo_write：模型调用经审批，dryRun 预览不弹栈，确认后恰好撤销一笔", async (t) => {
+  t.confirmDecisions = ["yes", "yes"];
+  const h = await makeHarness(t);
+  // 预置：一笔已批准的覆盖写入进入撤销栈
+  await h.exec({ op: "mcp", tool: "write_file", args: { path: "existing.md", content: "被覆盖了" } });
+  // 模型 dryRun 自查：纯预览不进入确认、不弹出撤销栈、文件不变
+  const preview = await h.exec({ op: "mcp", tool: "undo_write", args: { dryRun: true } });
+  assert.equal(preview.ok, true, preview.text);
+  assert.match(preview.text, /^风险: 覆盖已有内容/m);
+  assert.match(preview.text, /write_file existing\.md/);
+  assert.equal(h.confirmCalls.length, 1, "dryRun 预览不得触发新的确认（1 次来自预置写入）");
+  assert.equal(await fs.readFile(path.join(h.root, "existing.md"), "utf8"), "被覆盖了", "预览不得改动文件");
+  // 确认后执行：恰好撤销一笔（覆盖型恢复原内容）
+  const undone = await h.exec({ op: "mcp", tool: "undo_write", args: {} });
+  assert.equal(undone.ok, true, undone.text);
+  assert.equal(await fs.readFile(path.join(h.root, "existing.md"), "utf8"), "旧内容第一行\n旧内容第二行\n");
+  // 栈中只有一笔：再次撤销必须报错，不得连退或静默成功
+  const empty = await h.exec({ op: "mcp", tool: "undo_write", args: {} });
+  assert.equal(empty.ok, false, "撤销栈已空，第二次必须失败而不是连退");
+});
+
+test("写入门控 undo_write：host 写入清单按名拦截，未开放写入时 fail-closed 不产生副作用", async (t) => {
+  t.confirmDecisions = ["yes"];
+  const h = await makeHarness(t);
+  await h.exec({ op: "mcp", tool: "write_file", args: { path: "existing.md", content: "被覆盖了" } });
+  // 真实 isMcpWriteTool（非测试注入谓词）：allowWrite 关闭时必须拒绝且文件不变
+  const denied = await runAction(
+    { op: "mcp", tool: "undo_write", args: {} },
+    h.root,
+    { mcp: { client: h.client, allow: ["undo_write"], allowWrite: false } }
+  );
+  assert.equal(denied.ok, false);
+  assert.equal(denied.error, "write-not-allowed");
+  assert.equal(await fs.readFile(path.join(h.root, "existing.md"), "utf8"), "被覆盖了", "拒绝后文件不得变化");
+});
