@@ -41,6 +41,10 @@ export function createWriteGate({ runWithWrite, getMode, confirm }) {
   const sessionApproved = new Set(); // 会话同意过的工具名（「帮我批准」语义）
   return {
     sessionApproved,
+    /** 切换审批模式时收回会话同意：授权只缩不扩，收紧后同工具需重新确认。 */
+    resetApprovals() {
+      sessionApproved.clear();
+    },
     /** 非写动作返回 null（调用方按普通路径执行）；写动作返回执行结果或拒绝结果。 */
     async intercept(action, root) {
       if (action?.op !== "mcp" || !isMcpWriteTool(action.tool)) return null;

@@ -197,3 +197,18 @@ test("写入门控 undo_write：host 写入清单按名拦截，未开放写入�
   assert.equal(denied.error, "write-not-allowed");
   assert.equal(await fs.readFile(path.join(h.root, "existing.md"), "utf8"), "被覆盖了", "拒绝后文件不得变化");
 });
+
+test("写入门控：resetApprovals 收回会话同意，同工具再次写入重新询问", async (t) => {
+  t.confirmDecisions = ["session", "yes"];
+  const h = await makeHarness(t);
+  const first = await h.exec({ op: "mcp", tool: "write_file", args: { path: "new.txt", content: "hi" } });
+  assert.equal(first.ok, true, first.text);
+  assert.equal(h.confirmCalls.length, 1);
+  assert.ok(h.gate.sessionApproved.has("write_file"), "会话同意应记录在案");
+  // 用户切换审批模式时 cli 调用 resetApprovals：收紧后旧授权不得继续生效
+  h.gate.resetApprovals();
+  assert.ok(!h.gate.sessionApproved.has("write_file"));
+  const second = await h.exec({ op: "mcp", tool: "write_file", args: { path: "new.txt", content: "hi2" } });
+  assert.equal(second.ok, true, second.text);
+  assert.equal(h.confirmCalls.length, 2, "收回会话同意后必须重新询问");
+});

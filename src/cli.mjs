@@ -924,13 +924,17 @@ async function cmdWatch(argv) {
       if (q === "允许写入" || q === "allow-write") {
         // P60 兼容别名：等价于 写入模式 自动（帮我批准）
         writeMode = "auto";
-        process.stdout.write("写入审批模式：自动批准（帮我批准）——写入不再逐笔询问，.bak 备份与撤销记录仍保留；输入 写入模式 询问|风险|禁止 可切换，沙箱边界不随模式放宽。\n");
+        const revokedAllow = [...writeGate.sessionApproved];
+        writeGate.resetApprovals();
+        process.stdout.write("写入审批模式：自动批准（帮我批准）——写入不再逐笔询问，.bak 备份与撤销记录仍保留" + (revokedAllow.length ? `；会话同意已收回（${revokedAllow.join("、")}）` : "") + "；输入 写入模式 询问|风险|禁止 可切换，沙箱边界不随模式放宽。\n");
         rl.prompt();
         continue;
       }
       if (q === "禁止写入" || q === "deny-write") {
         writeMode = "deny";
-        process.stdout.write("写入审批模式：禁止——写入类 MCP 工具全部拒绝（fail-closed）。\n");
+        const revokedDeny = [...writeGate.sessionApproved];
+        writeGate.resetApprovals();
+        process.stdout.write("写入审批模式：禁止——写入类 MCP 工具全部拒绝（fail-closed）" + (revokedDeny.length ? `；会话同意已收回（${revokedDeny.join("、")}）` : "") + "。\n");
         rl.prompt();
         continue;
       }
@@ -943,8 +947,10 @@ async function cmdWatch(argv) {
             process.stdout.write("未知模式。用法：写入模式 询问|风险|自动|禁止（完全访问/帮我批准 等价于 自动）。\n");
           } else {
             writeMode = next;
+            const revoked = [...writeGate.sessionApproved];
+            writeGate.resetApprovals(); // 授权只缩不扩：切换模式即收回会话同意
             const desc = { deny: "禁止（fail-closed）", ask: "逐笔询问（每笔写入展示 diff 等你确认）", risk: "风险询问（仅覆盖已有内容时询问）", auto: "自动批准（帮我批准）" }[next];
-            process.stdout.write(`写入审批模式已切换：${desc}${next === "auto" ? "（沙箱边界不随模式放宽）" : ""}\n`);
+            process.stdout.write(`写入审批模式已切换：${desc}${revoked.length ? `；会话同意已收回（${revoked.join("、")}）` : ""}${next === "auto" ? "（沙箱边界不随模式放宽）" : ""}\n`);
           }
         } else {
           const approved = [...writeGate.sessionApproved];

@@ -12,10 +12,9 @@
 
 ## 写入审批
 
-- `src/host-actions.mjs` 的 `isMcpWriteTool` 使用固定名称清单识别写入工具；未命中的外部工具不能据此视为只读。所有工具仍须先通过目录允许列表。
-- `src/write-gate.mjs` 管理会话级模式：禁止（无可用终端确认的 console 路径维持此档）、逐笔询问（默认）、风险询问（覆盖已有内容时询问）、自动批准。逐笔询问提供 dryRun diff 预览及同意、会话同意、拒绝；会话同意只记住该工具本会话。确认期间持有调用，同意后同一调用直执，不耗模型轮次。
-- 自带文件 server 的 `write_file` / `create_directory` 保留 dryRun 预览；覆盖文件留 `.bak` 备份，会话内可用 `undo_write` 撤销。server 的授权根、敏感路径、越界、符号链接与二进制覆盖保护不随审批模式放宽。
-- **现有缺口**：`undo_write` 尚未列入 `isMcpWriteTool` 的写入名称清单。终端的「撤销写入」命令可用；网页模型若获该工具的目录授权，则其调用不会经过写入审批。修复门控前，接入自带文件 server 时用 `--mcp-allow` 明确排除 `undo_write`，并保留终端撤销入口。
+- `src/host-actions.mjs` 的 `isMcpWriteTool` 使用固定名称清单识别写入工具（含 `undo_write`：撤销同为副作用操作）；未命中的外部工具不能据此视为只读。所有工具仍须先通过目录允许列表。
+- `src/write-gate.mjs` 管理会话级模式：禁止（无可用终端确认的 console 路径维持此档）、逐笔询问（默认）、风险询问（覆盖已有内容时询问）、自动批准。逐笔询问提供 dryRun diff 预览及同意、会话同意、拒绝；会话同意只记住该工具本会话，切换审批模式即收回（`resetApprovals`）。确认期间持有调用，同意后同一调用直执，不耗模型轮次。
+- 自带文件 server 的 `write_file` / `create_directory` / `undo_write` 均保留 dryRun 预览（`undo_write` 的 dryRun 只报告将撤销哪一笔，不弹栈）；覆盖文件留 `.bak` 备份，会话内可用 `undo_write` 撤销。server 的授权根、敏感路径、越界、符号链接与二进制覆盖保护不随审批模式放宽。
 - 外部 server 的 dryRun、备份与撤销语义须按该 server 实际行为核实。当前 host 会发送 `dryRun: true` 请求预览，却不能验证 server 是否真的无副作用；未核实前不要把逐笔询问当成外部写入的无副作用预览或沙箱。
 
 ## 真实网页工具验证
