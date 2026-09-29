@@ -264,6 +264,29 @@ test("search: 目录递归跳过 node_modules，include 过滤文件名", async 
   assert.ok(!tsOnly.text.includes("b.js"));
 });
 
+test("search: 单文件 path 同样应用 include 过滤", async () => {
+  const root = await makeRoot();
+  await fs.writeFile(path.join(root, "app.ts"), "emit here;\n");
+
+  // 文件名匹配 include：正常搜索
+  const matched = await runAction(
+    { op: "search", path: "app.ts", pattern: "emit", include: "*.ts" },
+    root
+  );
+  assert.equal(matched.ok, true);
+  assert.match(matched.text, /app\.ts:1: /);
+
+  // 文件名不匹配 include：无命中并说明是过滤所致，不得静默返回命中
+  const filtered = await runAction(
+    { op: "search", path: "app.ts", pattern: "emit", include: "*.js" },
+    root
+  );
+  assert.equal(filtered.ok, true);
+  assert.match(filtered.text, /\(no matches\)/);
+  assert.match(filtered.text, /include/, "应说明是 include 过滤导致无命中");
+  assert.doesNotMatch(filtered.text, /app\.ts:1/, "被过滤的文件不得返回命中");
+});
+
 test("search: regex 模式与非法正则", async () => {
   const root = await makeRoot();
   await fs.writeFile(path.join(root, "a.js"), "foo(1);\nfoo2(2);\n");

@@ -710,6 +710,15 @@ async function searchRoot(root, full, rel, msg) {
 
   // 单文件：path 直接指到文件
   if (!st.isDirectory()) {
+    // include 与目录递归同语义：文件名不匹配时按过滤处理，不静默返回命中
+    if (include && !wildcardMatch(path.basename(full), include)) {
+      return {
+        ok: true,
+        op: "search",
+        path: rel,
+        text: `(no matches)\n（include 过滤器 "${include}" 不匹配该文件名，未搜索）`,
+      };
+    }
     if (st.size > SEARCH_MAX_FILE_BYTES) {
       return {
         ok: true,
