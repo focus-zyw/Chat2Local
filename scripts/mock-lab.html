@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>MCP Lab（会话状态验证页）</title>
+<style>
+  body { font-family: sans-serif; max-width: 640px; margin: 32px auto; }
+  .card { border: 1px solid #ccc; border-radius: 8px; padding: 12px 16px; margin: 12px 0; }
+  #details { color: #0a5; }
+</style>
+</head>
+<body>
+  <h1>MCP Lab</h1>
+  <div class="card" id="marker-line">加载中……</div>
+  <button id="expand">展开详情</button>
+  <div class="card" id="details" hidden></div>
+<script>
+  // 状态只存在于页面内存：刷新或重新导航即全部消失。
+  // beacon 仅用于验证取证（把当前内存状态报告给本地 lab 服务器），不是持久化。
+  const sessionUuid = crypto.randomUUID();
+  const marker = "LAB-" + Math.random().toString(36).slice(2, 10);
+  const lab = { sessionUuid, marker, detailsOpen: false };
+  window.__lab = lab;
+
+  function beacon(event) {
+    // 统一从 lab 读取当前状态（不要引用裸变量——点击后 detailsOpen 在 lab 上）
+    const body = JSON.stringify({ event, sessionUuid, marker, detailsOpen: lab.detailsOpen, at: Date.now() });
+    try {
+      fetch("/beacon", { method: "POST", headers: { "Content-Type": "application/json" }, body })
+        .catch(() => {});
+    } catch {
+      /* 取证失败不影响页面本身 */
+    }
+  }
+
+  document.getElementById("marker-line").textContent =
+    "会话标记：" + marker + "（会话 " + sessionUuid.slice(0, 8) + "）";
+  beacon("load");
+
+  document.getElementById("expand").addEventListener("click", () => {
+    if (lab.detailsOpen) return;
+    lab.detailsOpen = true;
+    const details = document.getElementById("details");
+    details.hidden = false;
+    details.textContent = "详情已展开（会话 " + sessionUuid.slice(0, 8) + "）——此状态仅存于页面内存";
+    document.getElementById("expand").textContent = "详情已展开";
+    beacon("expand");
+  });
+</script>
+</body>
+</html>

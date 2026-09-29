@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createMcpClient } from "../src/mcp-client.mjs";
 import {
   runAction,
   underRoot,
@@ -569,4 +571,198 @@ test("search: include 在收集阶段过滤，匹配文件不受 2000 扫描上�
   assert.equal(r.ok, true);
   assert.match(r.text, /bulk\/target\.md:1: needle here/, "include 应让匹配文件不被扫描上限挤出");
   assert.ok(!r.text.includes("文件上限"), "匹配文件未超上限时不应提示截断");
+}, 30000);
+
+// ── mcp：桥接用户指定的本地 MCP server ──
+
+test("mcp: 未配置 ctx 时返回明确错误，不影响其他 op", async () => {
+  const root = await makeRoot();
+  try {
+    const r = await runAction({ op: "mcp", tool: "search_files", args: { query: "x" } }, root);
+    assert.equal(r.ok, false);
+    assert.equal(r.error, "mcp-unconfigured");
+    assert.match(r.text, /--mcp/);
+    // 已有四 op 不受影响（双参数调用形式不变）
+    const ls = await runAction({ op: "ls", path: "." }, root);
+    assert.equal(ls.ok, true);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("mcp: tool/args 形状校验在触达连接之前拒绝", async () => {
+  const root = await makeRoot();
+  // 形状校验失败不应触达 client——stub 永远不会被调用到
+  const ctx = { mcp: { client: { isReady: () => true }, allow: ["t"] } };
+  try {
+    const badName = await runAction({ op: "mcp", tool: "bad name!", args: {} }, root, ctx);
+    assert.equal(badName.error, "bad-tool");
+    const noName = await runAction({ op: "mcp", args: {} }, root, ctx);
+    assert.equal(noName.error, "bad-tool");
+    const arrArgs = await runAction({ op: "mcp", tool: "t", args: [1] }, root, ctx);
+    assert.equal(arrArgs.error, "bad-args");
+    // args 过大
+    const big = await runAction(
+      { op: "mcp", tool: "t", args: { blob: "x".repeat(20000) } },
+      root,
+      ctx
+    );
+    assert.equal(big.error, "bad-args");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("mcp: 经常驻 client 桥接 demo server 跨目录搜索（无 path 要求）", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-ha1-"));
+  const root2 = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-ha2-"));
+  const script = fileURLToPath(new URL("../demo/mcp-search-server.mjs", import.meta.url));
+  const client = await createMcpClient(
+    { command: process.execPath, args: [script, root, root2], cwd: root },
+    { startupTimeoutMs: 15000 }
+  );
+  try {
+    await fs.writeFile(path.join(root, "a.md"), "MARKER one\n");
+    await fs.writeFile(path.join(root2, "b.md"), "MARKER two\n");
+    const r = await runAction(
+      { op: "mcp", tool: "search_files", args: { query: "MARKER" } },
+      root,
+      { mcp: { client, allow: ["search_files"] } }
+    );
+    assert.equal(r.ok, true);
+    assert.match(r.text, /\[R1\] a\.md:1: MARKER one/);
+    assert.match(r.text, /\[R2\] b\.md:1: MARKER two/);
+  } finally {
+    await client.close();
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(root2, { recursive: true, force: true });
+  }
+}, 30000);
+
+test("mcp: 允许列表外的工具本地拒绝；列表缺失失败关闭；连接停用后明确未执行", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-allow-"));
+  const script = fileURLToPath(new URL("../demo/mcp-search-server.mjs", import.meta.url));
+  const client = await createMcpClient(
+    { command: process.execPath, args: [script, root], cwd: root },
+    { startupTimeoutMs: 15000 }
+  );
+  try {
+    await fs.writeFile(path.join(root, "a.md"), "MARKER one\n");
+    const denied = await runAction(
+      { op: "mcp", tool: "no_such_tool", args: { query: "x" } },
+      root,
+      { mcp: { client, allow: ["search_files"] } }
+    );
+    assert.equal(denied.error, "tool-not-allowed");
+    assert.match(denied.text, /工具目录/);
+    const allowed = await runAction(
+      { op: "mcp", tool: "search_files", args: { query: "MARKER" } },
+      root,
+      { mcp: { client, allow: ["search_files"] } }
+    );
+    assert.equal(allowed.ok, true);
+    assert.match(allowed.text, /\[R1\] a\.md:1: MARKER one/);
+    // allow 缺省即没有任何工具得到授权，必须失败关闭
+    const noCatalog = await runAction(
+      { op: "mcp", tool: "search_files", args: { query: "MARKER" } },
+      root,
+      { mcp: { client } }
+    );
+    assert.equal(noCatalog.error, "tool-not-allowed");
+    assert.match(noCatalog.text, /未配置.*允许列表/);
+    // 连接停用后调用明确未执行（不自动重试、不重启）
+    await client.close();
+    const unavailable = await runAction(
+      { op: "mcp", tool: "search_files", args: { query: "MARKER" } },
+      root,
+      { mcp: { client, allow: ["search_files"] } }
+    );
+    assert.equal(unavailable.error, "mcp-unavailable");
+    assert.match(unavailable.text, /调用未执行/);
+  } finally {
+    await client.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}, 30000);
+
+test("mcp 写入门控: 写工具默认拒绝；允许写入后放行；禁止写入收回（fail-closed）", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-write-"));
+  const script = fileURLToPath(new URL("../demo/mcp-fs-server.mjs", import.meta.url));
+  const client = await createMcpClient(
+    { command: process.execPath, args: [script, root], cwd: root },
+    { startupTimeoutMs: 15000 }
+  );
+  try {
+    // 默认关闭：写工具即使已进允许列表也被拒，且连接不受影响
+    const denied = await runAction(
+      { op: "mcp", tool: "write_file", args: { path: "new.txt", content: "hi" } },
+      root,
+      { mcp: { client, allow: ["write_file"] } }
+    );
+    assert.equal(denied.ok, false);
+    assert.equal(denied.error, "write-not-allowed");
+    assert.match(denied.text, /允许写入/);
+    assert.equal(await fs.stat(path.join(root, "new.txt")).then(() => true, () => false), false, "拒绝时不得落盘");
+
+    // 只读工具不受门控影响
+    const listing = await runAction({ op: "mcp", tool: "list_directory", args: {} }, root, {
+      mcp: { client, allow: ["write_file", "list_directory"] },
+    });
+    assert.equal(listing.ok, true, listing.text);
+
+    // 用户 允许写入（allowWrite:true）：放行并真实落盘
+    const written = await runAction(
+      { op: "mcp", tool: "write_file", args: { path: "new.txt", content: "hello p60" } },
+      root,
+      { mcp: { client, allow: ["write_file"], allowWrite: true } }
+    );
+    assert.equal(written.ok, true, written.text);
+    assert.equal(await fs.readFile(path.join(root, "new.txt"), "utf8"), "hello p60");
+
+    // 覆盖已有文件留 .bak 备份
+    const overwritten = await runAction(
+      { op: "mcp", tool: "write_file", args: { path: "new.txt", content: "second" } },
+      root,
+      { mcp: { client, allow: ["write_file"], allowWrite: true } }
+    );
+    assert.equal(overwritten.ok, true, overwritten.text);
+    assert.match(overwritten.text, /\.bak/);
+    assert.equal(await fs.readFile(path.join(root, "new.txt.bak"), "utf8"), "hello p60");
+
+    // dryRun 不落盘
+    const preview = await runAction(
+      { op: "mcp", tool: "write_file", args: { path: "preview.txt", content: "x", dryRun: true } },
+      root,
+      { mcp: { client, allow: ["write_file"], allowWrite: true } }
+    );
+    assert.equal(preview.ok, true);
+    assert.match(preview.text, /^风险: 新建/m, "P61 起 dryRun 输出以风险分级开头");
+    assert.equal(await fs.stat(path.join(root, "preview.txt")).then(() => true, () => false), false);
+
+    // 禁止写入（allowWrite:false）：重新拒绝
+    const revoked = await runAction(
+      { op: "mcp", tool: "write_file", args: { path: "new.txt", content: "third" } },
+      root,
+      { mcp: { client, allow: ["write_file"], allowWrite: false } }
+    );
+    assert.equal(revoked.error, "write-not-allowed");
+
+    // 敏感路径与越界在开放写入下仍然拒绝（server 自身边界）
+    const sensitive = await runAction(
+      { op: "mcp", tool: "write_file", args: { path: ".env", content: "x" } },
+      root,
+      { mcp: { client, allow: ["write_file"], allowWrite: true } }
+    );
+    assert.equal(sensitive.ok, false);
+    assert.match(sensitive.text, /敏感/);
+    const outside = await runAction(
+      { op: "mcp", tool: "write_file", args: { path: "..", content: "x" } },
+      root,
+      { mcp: { client, allow: ["write_file"], allowWrite: true } }
+    );
+    assert.equal(outside.ok, false);
+  } finally {
+    await client.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
 }, 30000);

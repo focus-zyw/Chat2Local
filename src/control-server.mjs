@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { launchBrowser } from "./browser.mjs";
 import { createDriver } from "./page-driver.mjs";
-import { reconnectPayload, conversationIntroPayload, ROLE_IDS } from "./protocol.mjs";
+import { reconnectPayload, conversationIntroPayload, ROLE_DEFINITIONS, ROLE_IDS, roleDefinition } from "./protocol.mjs";
 import { getThread, saveThread } from "./state.mjs";
 import { SITES } from "./sites.mjs";
 import { startWatcher } from "./watcher.mjs";
@@ -312,7 +312,7 @@ export async function startControlServer({
       });
       if (stopRequested) return;
       state.phase = "running";
-      log("旁观执行已启动；请在标题带〔file-tool〕的专用浏览器窗口聊天。");
+      log("旁观执行已启动；请在标题带〔Chat2Local〕的专用浏览器窗口聊天。");
     } catch (err) {
       failure = err;
     } finally {
@@ -366,7 +366,7 @@ export async function startControlServer({
     state.role = roleRaw;
     state.error = "";
     state.events = [];
-    log(roleRaw === "text" ? "正在启动专用浏览器并发送文本问答开场白…" : "正在启动专用浏览器并发送导师开场白…");
+    log(roleDefinition(roleRaw).controlIntro);
     await saveLast(siteIdRaw, root, roleRaw);
     startTask = runStart(siteIdRaw, root, roleRaw).finally(() => { startTask = null; });
     return { status: 202, payload: status() };
@@ -391,7 +391,7 @@ export async function startControlServer({
         root: defaultRoot || last.root || process.cwd(),
         siteId: defaultSiteId || last.siteId || "",
         role: defaultRole || last.role || "code",
-        roles: [{ id: "code", label: "代码导师" }, { id: "text", label: "文本目录问答" }],
+        roles: ROLE_DEFINITIONS.map(({ id, label }) => ({ id, label })),
         sites: Object.entries(SITES).map(([id, site]) => ({ id, label: site.label })),
       });
     }

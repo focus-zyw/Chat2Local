@@ -1,14 +1,16 @@
-# file-tool：公开展示与复现
+# Chat2Local：公开展示与复现
 
-file-tool 让网页聊天通过本地协议请求读取文件、列目录、搜索内容和运行测试。它由本地 Node.js 进程执行动作，再把结果回填到浏览器中的对话。项目由郑焱文设计、验收，借助 AI 完成代码实现。
+Chat2Local 让网页聊天通过本地协议请求读取文件、列目录、搜索内容和运行测试。它由本地 Node.js 进程执行动作，再把结果回填到浏览器中的对话。项目由郑焱文设计、验收，借助 AI 完成代码实现。
+
+若用于面试，可先读[一分钟项目介绍与技术取舍](PORTFOLIO.md)，再运行下方的无账号演示。演示脚本、历史真实模型现场记录与当前全部功能的验证范围分别说明，不以一种证据代替另一种。GitHub 仓库现名为 `Chat2Local`，以下克隆命令指向该仓库。
 
 ## 快速复现核心流程
 
 环境：Windows 10/11、Node.js 20 或更新版本，以及 Chrome、Edge 或 Playwright Chromium。无需聊天网站账号或 API Key。
 
 ```powershell
-git clone https://github.com/focus-zyw/file-tool.git
-cd file-tool
+git clone https://github.com/focus-zyw/Chat2Local.git
+cd Chat2Local
 npm ci
 npx playwright install chromium
 npm run demo
@@ -29,6 +31,8 @@ SMOKE TEXT PASSED — 文本问答及来源行号全链路 OK
 ```powershell
 npm test
 ```
+
+还可分别运行 `npm run smoke:chat`、`npm run smoke:watch`、`npm run smoke:console`、`npm run smoke:profile`，检查导师对话、旁观执行、本地控制台和专用浏览器资料目录占用路径。历史真实模型的浏览器 MCP 任务见[P48 现场记录](runs/P48-field-run.md)，第二个独立 server 见[P50 兼容记录](runs/P50-cross-server-field-run.md)；两者均为当时的脱敏记录，未在本演示命令中重跑。
 
 ## 实际网站使用
 

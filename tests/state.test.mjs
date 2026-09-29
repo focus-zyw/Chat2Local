@@ -97,3 +97,23 @@ test("threads: 替换失败时旧登记不变且临时文件被清理", (t) => {
   assert.equal(fs.readFileSync(file, "utf8"), original);
   assert.deepEqual(fs.readdirSync(dir), ["threads.json"]);
 });
+
+test("threads: 摘要保存/取出即清除/无线程拒绝", (t) => {
+  const { store } = makeStore(t);
+  const root = "D:\compress-project";
+  // 没有登记线程时不能保存摘要
+  assert.throws(() => store.saveSummary("deepseek", root, "task", "摘要"), /没有已登记线程/);
+  store.saveThread("deepseek", root, "https://chat.deepseek.com/a/chat/s/old", "task");
+  store.saveSummary("deepseek", root, "task", "旧线程摘要：学到 P59");
+  // 摘要挂在同 key 登记上，URL 保留
+  assert.equal(store.getThread("deepseek", root, "task").url, "https://chat.deepseek.com/a/chat/s/old");
+  // takeSummary 取出即清除：第二次为 null；登记本体仍在
+  assert.equal(store.takeSummary("deepseek", root, "task"), "旧线程摘要：学到 P59");
+  assert.equal(store.takeSummary("deepseek", root, "task"), null);
+  assert.ok(store.getThread("deepseek", root, "task"));
+  // 角色隔离：code 角色的摘要互不可见
+  store.saveThread("deepseek", root, "https://chat.deepseek.com/a/chat/s/code", "code");
+  store.saveSummary("deepseek", root, "code", "code 摘要");
+  assert.equal(store.takeSummary("deepseek", root, "code"), "code 摘要");
+  assert.equal(store.takeSummary("deepseek", root, "task"), null);
+});

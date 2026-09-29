@@ -1,12 +1,15 @@
 /**
- * 本地文件操作执行器 —— file-tool 的三个能力：读文件 / 读目录结构 / 运行测试文件。
+ * 本地文件操作执行器 —— Chat2Local 的能力入口：读文件 / 读目录结构 / 运行测试文件 /
+ * 内容搜索 / mcp 桥接。
  *
- * 参考 web-tool/native-host/host-actions.js 的路径沙箱设计，但只保留三个只读+
- * 运行 op（read / ls / run），不提供任何写入口，安全面更小：
+ * 参考 web-tool/native-host/host-actions.js 的路径沙箱设计，read / ls / run / search
+ * 四个本地 op 只读+运行，不提供任何写入口，安全面更小：
  * - 所有路径必须是 Host Root 下的相对路径；`..`、绝对路径、盘符一律拒绝。
  * - run 只接受白名单扩展名，带超时（超时 kill 子进程）与输出上限。
  * - read 带 offset/length 分段读；超上限截断并提示续读。
  * - ls 支持递归树，条目封顶；缺失路径返回 "(missing)" 而非报错（便宜探测）。
+ * - mcp 桥接用户经 --mcp 指定的本地 MCP server 只读/受信工具（ctx 注入），
+ *   超时、进程树终止与输出上限复用 mcp-client 的防护。
  *
  * 纯函数式："action in → result out"，无浏览器依赖，可被 node --test 直接测。
  */
@@ -18,6 +21,8 @@ import path from "node:path";
 import process from "node:process";
 import { StringDecoder } from "node:string_decoder";
 import { isSensitivePath } from "./sensitive-paths.mjs";
+import { terminateProcessTree } from "./kill-tree.mjs";
+import { MCP_ARGS_MAX_CHARS, MCP_TIMEOUT_MAX_MS, MCP_TIMEOUT_MS } from "./mcp-client.mjs";
 
 // ── 上限（与协议提示保持一致；改这里要同步 src/protocol.mjs 的文案）──
 export const READ_MAX_CHARS = 12000; // 单次 read 返回的字符上限
@@ -34,7 +39,7 @@ export const SEARCH_LINE_CHARS = 200; // search 单行字符上限
 export const SEARCH_MAX_FILE_BYTES = 1_000_000; // 超过此大小的文件跳过搜索
 export const SEARCH_MAX_FILES = 2000; // 单次 search 最多扫描的文件数
 export const SEARCH_MAX_CONTEXT = 3; // search 上下文行数上限
-export const KNOWN_OPS = ["read", "ls", "run", "search"];
+export const KNOWN_OPS = ["read", "ls", "run", "search", "mcp"];
 
 // 递归 ls 默认跳过的目录：第三方依赖、版本库、构建产物、缓存。
 // 它们对理解项目结构是噪音，还会把 LS_MAX_ENTRIES 的清单额度烧光，诱导
@@ -65,61 +70,6 @@ export const LS_IGNORED_DIRS = new Set([
 // run 允许的扩展名 → 解释器。不认识的扩展名直接拒绝，避免 EFTYPE 之类的
 // spawn 错误让模型摸不着头脑（同 web-tool runFile 的 readable-reason 做法）。
 const RUN_WINDOWS_SHELL_EXTS = new Set([".bat", ".cmd"]);
-
-/** 超时时终止整个进程树，避免测试脚本派生的服务或 watcher 留在后台。 */
-function terminateProcessTree(child) {
-  return new Promise((resolve) => {
-    if (!child?.pid) return resolve();
-    if (process.platform !== "win32") {
-      try {
-        // 非 Windows 子进程以独立进程组启动，负 PID 会终止整个组。
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          /* already gone */
-        }
-      }
-      return resolve();
-    }
-
-    let finished = false;
-    let killer;
-    const finish = () => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(fallbackTimer);
-      resolve();
-    };
-    const fallback = () => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* already gone */
-      }
-      finish();
-    };
-    const fallbackTimer = setTimeout(() => {
-      try {
-        killer?.kill();
-      } catch {
-        /* already gone */
-      }
-      fallback();
-    }, 5000);
-    try {
-      killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-        windowsHide: true,
-        stdio: "ignore",
-      });
-      killer.once("error", fallback);
-      killer.once("close", finish);
-    } catch {
-      fallback();
-    }
-  });
-}
 
 /** candidate 必须等于 base 或落在 base 内。两者都应是绝对路径。 */
 function isUnderRoot(base, candidate) {
@@ -183,18 +133,21 @@ function clip(text, max, hint) {
   return `${t.slice(0, max)}\n[truncated ${t.length - max} chars; total ${t.length}${hint}]`;
 }
 
-/** 执行一个动作：{op, path, ...} → {ok, text, ...}。root 为 Host Root 绝对路径。 */
-export async function runAction(msg, root) {
+/** 执行一个动作：{op, path, ...} → {ok, text, ...}。root 为 Host Root 绝对路径。
+ * ctx: 可选 {mcp?: {client, allow}} —— mcp 动作的常驻连接与允许列表，由 CLI 层
+ * 创建/探测后注入；未配置时 mcp 动作返回明确的可读错误（模型可选）。
+ * 模型永远不能通过动作选择 server、命令或创建连接，信任边界与 --root 同级。 */
+export async function runAction(msg, root, ctx = {}) {
   if (!msg || typeof msg !== "object") return { ok: false, error: "bad-action" };
   const op = String(msg.op || "");
   if (!KNOWN_OPS.includes(op)) {
     return {
       ok: false,
       error: "unknown-op",
-      text: `未知 op "${op}" — 只支持 read / ls / run`,
+      text: `未知 op "${op}" — 只支持 read / ls / run / search / mcp`,
     };
   }
-  const rel = String(msg.path ?? "").trim();
+  if (op === "mcp") return mcpAction(msg, ctx);  const rel = String(msg.path ?? "").trim();
   if (!rel) return { ok: false, error: "bad-path", text: "动作缺少 path" };
   if (path.isAbsolute(rel) || /^[a-zA-Z]:/.test(rel) || rel.startsWith("\\\\")) {
     return {
@@ -226,6 +179,105 @@ export async function runAction(msg, root) {
   if (op === "run") return runFile(root, checked.full, rel, msg);
   if (op === "search") return searchRoot(checked.realRoot, checked.full, rel, msg);
   return { ok: false, error: "unknown-op" };
+}
+
+// ── mcp：桥接用户指定的本地 MCP server 工具 ──
+// 与本地四个 op 的沙箱模型不同：server 由用户经 --mcp 指定（模型不可选），
+// 工具入参对 host 不透明，路径等语义由 server 自行约束；host 只做形状与
+// 体积校验，防止失控循环把参数撑爆。读取类/写入类取决于接入的 server。
+// 授权与连接：ctx.mcp = { client, allow } —— client 是 watch 级常驻连接
+// （目录发现与调用必须同一个 client，避免"进程 A 取目录、进程 B 执行"的
+// 会话不一致）；allow 是开场白展示的工具目录，server 可能暴露更多工具，
+// 但未进目录的一律拒绝——展示、授权、执行三者保持一致。
+// 结果语义（watcher 依赖）：requiresConfirmation:true 表示请求已发出但结果
+// 不明，watcher 必须停止自动执行，不能当普通失败回填后继续。
+//
+// 写入门控（P60）：写入类工具在允许列表之上还要过第二道门——会话级
+// allowWrite 开关。默认关闭（fail-closed）：即使 server 暴露且已进目录，
+// 写工具也拒绝执行；用户在终端显式 `允许写入` 后本会话内放行，`禁止写入`
+// 随时收回。清单固定按名匹配（写类工具的通用命名），不在清单内的工具按
+// 只读处理；放行决定权始终在用户，模型无法通过选名绕过。
+const MCP_WRITE_TOOLS = new Set([
+  "write_file", "edit_file", "create_directory", "move_file",
+  "write", "edit", "create", "mkdir", "mv", "patch", "apply_patch",
+]);
+
+export function isMcpWriteTool(toolName) {
+  return MCP_WRITE_TOOLS.has(String(toolName ?? "").toLowerCase());
+}
+
+async function mcpAction(msg, ctx) {
+  const mcp = ctx?.mcp;
+  if (!mcp?.client) {
+    return {
+      ok: false,
+      error: "mcp-unconfigured",
+      text: 'mcp 动作未配置：本会话没有可用的 MCP server（启动工具时需要 --mcp 指定本地 server 脚本）。当前仍可用 read / ls / run / search。',
+    };
+  }
+  const tool = String(msg.tool ?? "").trim();
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(tool)) {
+    return {
+      ok: false,
+      error: "bad-tool",
+      text: `mcp 动作需要合法 tool 名（1–64 位字母/数字/-/_），收到 "${tool || "(缺失)"}"`,
+    };
+  }
+  if (isMcpWriteTool(tool) && mcp.allowWrite !== true) {
+    return {
+      ok: false,
+      error: "write-not-allowed",
+      text: `工具 "${tool}" 是写入类操作，本会话未开放写入。如确需写入，请在本机终端输入 允许写入 开放（仅本次 watch 会话有效），开放后重新发起同样的调用；或先用只读工具核查目标内容。`,
+    };
+  }
+  const args = msg.args ?? {};
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return { ok: false, error: "bad-args", text: "mcp 动作的 args 必须是对象（工具入参）" };
+  }
+  let argsJson;
+  try {
+    argsJson = JSON.stringify(args);
+  } catch {
+    return { ok: false, error: "bad-args", text: "mcp 动作的 args 无法序列化为 JSON" };
+  }
+  if (argsJson.length > MCP_ARGS_MAX_CHARS) {
+    return {
+      ok: false,
+      error: "bad-args",
+      text: `mcp 动作 args 过大（${argsJson.length} 字符，上限 ${MCP_ARGS_MAX_CHARS}）`,
+    };
+  }
+  if (!Array.isArray(mcp.allow)) {
+    return {
+      ok: false,
+      error: "tool-not-allowed",
+      text: `工具 "${tool}" 未获授权：本会话未配置 MCP 工具允许列表`,
+    };
+  }
+  if (!mcp.allow.includes(tool)) {
+    return {
+      ok: false,
+      error: "tool-not-allowed",
+      text: `工具 "${tool}" 不在本会话的 MCP 工具目录（${mcp.allow.join("、") || "空"}）内——只有开场白/能力更新里列出的工具被授权`,
+    };
+  }
+  if (typeof mcp.client.isReady === "function" && !mcp.client.isReady()) {
+    return {
+      ok: false,
+      error: "mcp-unavailable",
+      text: `MCP 连接不可用（${mcp.client.unusableReason || "未就绪"}）——调用未执行，不自动重试`,
+    };
+  }
+  const timeoutMs =
+    Number.isFinite(Number(msg.timeoutMs)) && Number(msg.timeoutMs) > 0
+      ? Math.min(Math.floor(Number(msg.timeoutMs)), MCP_TIMEOUT_MAX_MS)
+      : MCP_TIMEOUT_MS;
+  const res = await mcp.client.callTool(tool, args, { timeoutMs });
+  if (res.requiresConfirmation || res.error === "mcp-outcome-unknown") {
+    return { ok: false, op: "mcp", tool, error: "mcp-outcome-unknown", text: res.text, requiresConfirmation: true };
+  }
+  if (!res.ok) return { ok: false, error: res.error || "mcp-failed", text: res.text };
+  return { ok: true, op: "mcp", tool, text: res.text };
 }
 
 // ── read：文件内容；两种坐标——字符 offset/length 与 行号 line/lines ──

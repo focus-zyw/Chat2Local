@@ -14,7 +14,7 @@
 </style>
 </head>
 <body>
-  <h1>Mock Chat（file-tool 自测）</h1>
+  <h1>Mock Chat（Chat2Local 自测）</h1>
   <div id="log"></div>
   <button id="stop">停止</button>
   <form id="f">
@@ -29,6 +29,7 @@
   let diagnose = false; // 排障冒烟：按证据链依次 search、read、run
   let textRole = false; // 文本目录问答：搜索笔记并引用行号
   let textTask = false;
+  let taskRole = false; // 任务执行角色（watch）：连续执行到 done 总结
 
   function addBubble(cls, text) {
     const b = document.createElement("div");
@@ -56,6 +57,15 @@
   }
 
   function replyFor(incoming) {
+    // ── task 角色剧本：开场白只待命，收到明确任务后才取材料 ──
+    if (incoming.includes("任务执行助手")) {
+      taskRole = true;
+      return "TASK-READY 已准备，等待明确任务。";
+    }
+    if (taskRole && incoming.includes("明确任务：读取 package.json")) {
+      return "收到任务，读取目标文件。\n" + FENCE + "host\n" +
+        JSON.stringify([{ op: "read", path: "package.json" }]) + "\n" + FENCE;
+    }
     if (incoming.includes("文本目录问答助手")) {
       textRole = true;
       textTask = incoming.includes("任务：");
@@ -94,7 +104,20 @@
         "。下一步：检查设置 enabled 的业务预期。\n" + FENCE;
     }
     // ── watch 冒烟：收到工具自动回填的结果 → 讲解（无动作）──
-    if (incoming.includes("[file-tool 自动回填")) {
+    // mcp 场景先行：回填里若出现 [1] mcp …，断言两个授权目录的命中都到了
+    if (/\[(?:Chat2Local|file-tool) 自动回填/.test(incoming)) {
+      if (/\[1\] mcp search_files/.test(incoming)) {
+        const r1 = /\[R1\] [^\n]*MARKER/.test(incoming);
+        const r2 = /\[R2\] [^\n]*MARKER/.test(incoming);
+        return (r1 && r2 ? "MCP-FEED-OK " : "MCP-FEED-FAIL ") +
+          "跨目录搜索命中：R1 与 R2 " + (r1 && r2 ? "都" : "未") + "看到 MARKER。";
+      }
+      if (taskRole) {
+        // task 角色：回填里必须带任务版续行指示，随后直接给出 done 结论 + 证据
+        const taskNote = /收到结果后继续执行/.test(incoming);
+        return FENCE + "done\n" + (taskNote ? "TASK-DONE" : "TASK-FAIL") +
+          " 任务完成：项目名为 watch-fixture（证据：[1] read package.json → ok）。\n" + FENCE;
+      }
       return "WATCHER-FEED-OK 收到回填结果，讲解如下：项目结构一目了然。";
     }
     // ── chat（导师）剧本：开场白 → ls → 讲解；后续提问回纯讲解 ──
@@ -155,14 +178,21 @@
 
   // ?auto=1：模拟用户已直接在网页上提问，assistant 回复带 host 动作块
   //（watch 冒烟用——验证旁观执行器能发现并回填）
+  // ?auto=mcp：动作改为 mcp 桥接（跨两个授权目录搜索），验证 网页→host→MCP→回填
   if (location.search.includes("auto")) {
+    const kind = new URLSearchParams(location.search).get("auto");
     setTimeout(() => {
-      addBubble("user", "（用户在网页上问：这个项目是干嘛的？）");
+      const ask = kind === "mcp"
+        ? "（用户在网页上问：帮我跨两个授权目录搜 MARKER）"
+        : "（用户在网页上问：这个项目是干嘛的？）";
+      addBubble("user", ask);
       turns++;
       const b = addBubble("assistant", "");
-      b.querySelector(".md-body").textContent =
-        "我需要先看下目录结构。\n" + FENCE + "host\n" +
-        JSON.stringify([{ op: "ls", path: "." }]) + "\n" + FENCE;
+      b.querySelector(".md-body").textContent = kind === "mcp"
+        ? "我用 MCP 工具跨目录搜索。\n" + FENCE + "host\n" +
+          JSON.stringify([{ op: "mcp", tool: "search_files", args: { query: "MARKER" } }]) + "\n" + FENCE
+        : "我需要先看下目录结构。\n" + FENCE + "host\n" +
+          JSON.stringify([{ op: "ls", path: "." }]) + "\n" + FENCE;
     }, 600);
   }
 

@@ -4,10 +4,11 @@ import fs from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import { ROLE_IDS } from "./protocol.mjs";
 
 const DEFAULT_FILE = path.join(os.homedir(), ".file-tool", "watch-checkpoints.json");
 const MAX_ENTRIES = 100;
-const PHASES = new Set(["executing", "delivering", "processed"]);
+const PHASES = new Set(["executing", "delivering", "catalog-sync", "processed"]);
 
 function hash(value) {
   return createHash("sha256").update(String(value)).digest("hex");
@@ -117,11 +118,13 @@ export function createWatchCheckpointStore(file = DEFAULT_FILE, io = fs) {
 
 export const watchCheckpointStore = createWatchCheckpointStore();
 
-/** 切换角色不应绕过另一角色尚未人工核对的动作。 */
+/** 切换角色不应绕过任何其他角色尚未人工核对的动作（code/text/task 两两互查）。 */
 export function assertOtherRoleClear(store, siteId, root, role) {
-  const other = role === "text" ? "code" : "text";
-  const checkpoint = store.forThread(siteId, root, "", other).read();
-  if (checkpoint && checkpoint.phase !== "processed") {
-    throw new Error("另一任务角色有未确认的 watch 动作；请切回原角色，在原聊天人工核对后再启动");
+  for (const other of ROLE_IDS) {
+    if (other === role) continue;
+    const checkpoint = store.forThread(siteId, root, "", other).read();
+    if (checkpoint && checkpoint.phase !== "processed") {
+      throw new Error(`另一任务角色（${other}）有未确认的 watch 动作；请切回原角色，在原聊天人工核对后再启动`);
+    }
   }
 }

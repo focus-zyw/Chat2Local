@@ -226,8 +226,9 @@ export async function createDriver({
       await ensurePage();
       await page
         .evaluate(() => {
-          if (!document.title.includes("〔file-tool〕")) {
-            document.title = "〔file-tool〕" + document.title;
+          document.title = document.title.replace("〔file-tool〕", "〔Chat2Local〕");
+          if (!document.title.includes("〔Chat2Local〕")) {
+            document.title = "〔Chat2Local〕" + document.title;
           }
         })
         .catch(() => {});

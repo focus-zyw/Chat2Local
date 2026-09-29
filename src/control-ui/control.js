@@ -10,6 +10,7 @@ let working = false;
 let threadCheckTimer;
 let threadCheckSeq = 0;
 let lastPhase = "";
+const roleLabels = new Map();
 
 function queueThreadCheck() {
   clearTimeout(threadCheckTimer);
@@ -62,7 +63,7 @@ function render(status) {
   document.querySelector("#state-text").textContent = names[phase] || "状态未知";
   document.querySelector("#state").className = `state ${phase}`;
   document.querySelector("#active-root").textContent = status.root || "—";
-  document.querySelector("#active-role").textContent = status.role === "text" ? "文本目录问答" : "代码导师";
+  document.querySelector("#active-role").textContent = roleLabels.get(status.role) || status.role;
   document.querySelector("#active-browser").textContent = status.channel || "—";
   const health = status.health || { state: "unknown", reason: "暂时无法确认" };
   const healthNames = { healthy: "健康", stopped: "已停止", unknown: "状态不明" };
@@ -169,6 +170,7 @@ try {
     siteInput.append(option);
   }
   for (const role of bootstrap.roles) {
+    roleLabels.set(role.id, role.label);
     const option = document.createElement("option");
     option.value = role.id;
     option.textContent = role.label;

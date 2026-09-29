@@ -587,3 +587,54 @@ test("browse: 指向文件时回退父目录；不存在的路径返回 error", 
   const missing = await listDirectories(path.join(root, "nope"));
   assert.match(missing.error, /不存在/);
 });
+
+test("本地控制台：task 角色可选，开场白与登记按角色，跨角色断点拦截同样生效", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "file-tool-task-console-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = createThreadStore(path.join(root, "threads.json"));
+  const checkpointStore = createWatchCheckpointStore(path.join(root, "watch.json"));
+  const sent = [];
+  const app = await startControlServer({
+    getThreadFn: store.getThread,
+    saveThreadFn: store.saveThread,
+    checkpointStore,
+    launchBrowserFn: async () => ({ channel: "测试浏览器", context: { on() {}, async close() {} } }),
+    createDriverFn: async () => ({
+      async markTab() {},
+      async send(payload) { sent.push(payload); return { ok: true, text: "已收到" }; },
+      currentUrl() { return "https://chatgpt.com/c/task-1"; },
+    }),
+    startWatcherFn: async () => async () => {},
+  });
+  t.after(() => app.close());
+  const bootstrap = await (await fetch(`${app.url}api/bootstrap`)).json();
+  const post = (route, body) => fetch(`${app.url}api/${route}`, {
+    method: "POST",
+    headers: { Origin: app.url.slice(0, -1), "Content-Type": "application/json", "X-File-Tool-Token": bootstrap.token },
+    body: JSON.stringify(body),
+  });
+  // 下拉选项包含任务执行
+  assert.ok(bootstrap.roles.some((r) => r.id === "task" && r.label === "任务执行"));
+  // 跨角色断点拦截对 task 同样生效：code 角色有未确认断点时，task 启动被拒
+  const codeCheckpoint = checkpointStore.forThread("chatgpt", root, "https://chatgpt.com/c/old-code", "code");
+  codeCheckpoint.write({ phase: "executing", replyId: "b".repeat(64), actionCount: 1 });
+  const blocked = await post("start", { siteId: "chatgpt", root, role: "task" });
+  assert.equal(blocked.status, 400);
+  assert.match((await blocked.json()).error, /另一任务角色.*未确认/);
+  codeCheckpoint.acknowledge();
+  const started = await post("start", { siteId: "chatgpt", root, role: "task" });
+  assert.equal(started.status, 202);
+  assert.equal((await waitPhase(app.url, "running")).role, "task");
+  assert.match(sent.at(-1), /任务执行助手/);
+  assert.ok(store.getThread("chatgpt", root, "task"), "task 角色应独立登记线程");
+  assert.equal(store.getThread("chatgpt", root), null, "不影响 code 角色的默认登记键");
+  await post("stop", {});
+  await waitPhase(app.url, "idle");
+  // 反向：task 角色有未确认断点时，默认 code 角色启动同样被拦
+  const taskCheckpoint = checkpointStore.forThread("chatgpt", root, "https://chatgpt.com/c/task-1", "task");
+  taskCheckpoint.write({ phase: "executing", replyId: "c".repeat(64), actionCount: 1 });
+  const blockedCode = await post("start", { siteId: "chatgpt", root });
+  assert.equal(blockedCode.status, 400);
+  assert.match((await blockedCode.json()).error, /另一任务角色（task）.*未确认/);
+  taskCheckpoint.acknowledge();
+});

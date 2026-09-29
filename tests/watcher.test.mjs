@@ -89,7 +89,7 @@ test("watcher: 动作→执行→回填；纯讲解只通知不回填", async ()
   assert.equal(executed.length, 1);
   assert.equal(executed[0], "src");
   assert.equal(delivered.length, 1);
-  assert.match(delivered[0], /file-tool 自动回填/);
+  assert.match(delivered[0], /Chat2Local 自动回填/);
   assert.match(delivered[0], /\[1\] ls src → ok/);
   assert.equal(replies.length, 1);
   assert.match(replies[0], /入口在/);
@@ -498,5 +498,167 @@ test("watcher: waitForChange 路径——唤醒即处理，无需固定轮询", 
   assert.equal(executed.length, 1);
   assert.equal(executed[0], "src");
   assert.equal(delivered.length, 1);
-  assert.match(delivered[0], /file-tool 自动回填/);
+  assert.match(delivered[0], /Chat2Local 自动回填/);
+});
+
+test("watcher: 结果不明的动作停止批次与回填，保留未确认断点", async () => {
+  const reply =
+    '用两个工具。\n```host\n[{"op":"mcp","tool":"a","args":{}},{"op":"mcp","tool":"b","args":{}}]\n```';
+  const delivered = [];
+  const executed = [];
+  const fatal = [];
+  const checkpointFile = path.join(os.tmpdir(), `watcher-halt-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
+  const checkpoint = createWatchCheckpointStore(checkpointFile).forThread("mock", os.tmpdir(), "https://mock/x");
+  const stop = await startWatcher({
+    driver: { async snapshot() { return { busy: false, text: reply }; } },
+    root: os.tmpdir(),
+    checkpoint,
+    execAction: async (action) => {
+      executed.push(action.tool);
+      return { ok: false, error: "mcp-outcome-unknown", text: "MCP 调用超时——结果不明", requiresConfirmation: true };
+    },
+    intervalMs: 5,
+    stableMs: 30,
+    log: () => {},
+    onFatal: (message) => fatal.push(message),
+  });
+  await sleep(300);
+  await stop();
+  assert.deepEqual(executed, ["a"], "只执行到结果不明的动作，同批次后续动作不再开始");
+  assert.equal(delivered.length, 0, "结果不明时不得把失败当普通结果回填");
+  assert.equal(fatal.length, 1);
+  assert.match(fatal[0], /结果不明/);
+  assert.match(checkpoint.read()?.phase ?? "", /executing|delivering/, "断点保留在未确认状态等人工核对");
+  assert.notEqual(checkpoint.read()?.phase, "processed");
+  await fs.rm(checkpointFile, { force: true });
+});
+
+test("watcher: 停止信号在在途动作结束后阻止下一项及回填", async () => {
+  let entered;
+  let release;
+  const firstActionStarted = new Promise((resolve) => { entered = resolve; });
+  const firstActionMayFinish = new Promise((resolve) => { release = resolve; });
+  const executed = [];
+  const delivered = [];
+  const checkpointFile = path.join(os.tmpdir(), `watcher-signal-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
+  const checkpoint = createWatchCheckpointStore(checkpointFile).forThread("mock", os.tmpdir(), "https://mock/signal");
+  const stop = await startWatcher({
+    driver: {
+      async snapshot() {
+        return { busy: false, text: '```host\n[{"op":"read","path":"a"},{"op":"read","path":"b"}]\n```' };
+      },
+      async deliver(payload) { delivered.push(payload); return { ok: true }; },
+    },
+    root: os.tmpdir(),
+    checkpoint,
+    execAction: async (action) => {
+      executed.push(action.path);
+      if (action.path === "a") {
+        entered();
+        await firstActionMayFinish;
+      }
+      return { ok: true, text: "完成" };
+    },
+    intervalMs: 5,
+    stableMs: 1,
+    log: () => {},
+  });
+  try {
+    await firstActionStarted;
+    stop.signal();
+    release();
+    await stop();
+    assert.deepEqual(executed, ["a"], "停止后不得开始下一项动作");
+    assert.equal(delivered.length, 0, "停止后不得开始回填");
+    assert.equal(checkpoint.read()?.phase, "executing", "已执行动作未回填时保留人工核对断点");
+  } finally {
+    release?.();
+    await stop();
+    await fs.rm(checkpointFile, { force: true });
+  }
+});
+
+test("watcher: MCP 日志只显示固定参数名，参数值与未知参数名不外泄", async () => {
+  const secret = "P48-DO-NOT-LOG-SECRET";
+  const reply =
+    "步骤。\n```host\n" +
+    JSON.stringify([
+      { op: "mcp", tool: "browser_click", args: { element: `展开详情 ${secret}`, target: "s1e5", [secret]: "x" } },
+      { op: "mcp", tool: "browser_evaluate", args: { function: `async () => '${secret}'` } },
+      { op: "ls", path: "src" },
+    ]) +
+    "\n```";
+  const logs = [];
+  const stop = await startWatcher({
+    driver: {
+      async snapshot() { return { busy: false, text: reply }; },
+      async deliver() { return { ok: true }; },
+    },
+    root: os.tmpdir(),
+    log: (m) => logs.push(m),
+    execAction: async () => ({ ok: true, text: "x" }),
+    intervalMs: 5,
+    stableMs: 30,
+  });
+  await sleep(300);
+  await stop();
+  const clickLine = logs.find((l) => l.includes("browser_click"));
+  assert.match(clickLine, /mcp browser_click .*element.*target.*值已省略.* → ok/);
+  const evalLine = logs.find((l) => l.includes("browser_evaluate"));
+  assert.match(evalLine, /mcp browser_evaluate .*function.*值已省略.* → ok/);
+  assert.doesNotMatch(logs.join("\n"), /P48-DO-NOT-LOG-SECRET|s1e5/, "常规日志不得出现入参值或未知字段名");
+  const lsLine = logs.find((l) => /\bls src\b/.test(l));
+  assert.match(lsLine, /(^|\s)ls src → ok/, "本地动作保持 op+path 格式");
+  assert.doesNotMatch(lsLine, /\{"/, "本地动作不带 JSON 片段");
+});
+
+test("watcher: MCP 结果不明通知不携带参数值", async () => {
+  const secret = "P48-UNKNOWN-OUTCOME-SECRET";
+  const reply = `\`\`\`host\n${JSON.stringify({ op: "mcp", tool: "browser_click", args: { element: secret, target: "e4" } })}\n\`\`\``;
+  const logs = [];
+  const fatal = [];
+  const stop = await startWatcher({
+    driver: { async snapshot() { return { busy: false, text: reply }; } },
+    root: os.tmpdir(),
+    log: (message) => logs.push(message),
+    onFatal: (message) => fatal.push(message),
+    execAction: async () => ({ ok: false, error: "mcp-outcome-unknown", text: "连接断开", requiresConfirmation: true }),
+    intervalMs: 5,
+    stableMs: 30,
+  });
+  await sleep(300);
+  await stop();
+  assert.equal(fatal.length, 1);
+  assert.match(fatal[0], /browser_click.*element.*target.*结果不明/);
+  assert.doesNotMatch([...logs, ...fatal].join("\n"), /P48-UNKNOWN-OUTCOME-SECRET|\be4\b/);
+});
+
+test("watcher: ```summary 围栏走 onSummary，其余无动作回复走 onReply", async () => {
+  const summaries = [];
+  const replies = [];
+  let snapshot = {
+    busy: false,
+    text: "```summary\n旧线程摘要：任务进行到第 3 步，下一步读取配置。\n```",
+  };
+  const stop = await startWatcher({
+    driver: {
+      async snapshot() { return snapshot; },
+      async deliver() { return { ok: true }; },
+    },
+    root: os.tmpdir(),
+    intervalMs: 5,
+    stableMs: 1,
+    onSummary: (s) => summaries.push(s),
+    onReply: (t) => replies.push(t),
+  });
+  for (let i = 0; i < 100 && !summaries.length; i++) await sleep(10);
+  // 同一回复只处理一次：摘要捕获后切换为普通讲解，不应进 onReply
+  snapshot = { busy: false, text: "普通讲解内容" };
+  for (let i = 0; i < 100 && !replies.length; i++) await sleep(10);
+  await stop();
+
+  assert.equal(summaries.length, 1);
+  assert.match(summaries[0], /任务进行到第 3 步/);
+  assert.equal(replies.length, 1);
+  assert.match(replies[0], /普通讲解内容/);
 });

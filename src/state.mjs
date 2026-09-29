@@ -85,10 +85,37 @@ export function createThreadStore(file = THREADS_FILE, io = fs) {
     return true;
   }
 
-  return { getThread, saveThread, clearThread };
+  /** 压缩续接：保存模型为旧线程生成的摘要（仅在用户确认后调用）。
+   * 摘要与线程登记同 key 存储；只在下次 --new 开新线程时被消费一次。 */
+  function saveSummary(siteId, root, role, text) {
+    const map = load();
+    const key = threadKey(siteId, root, role);
+    const entry = map[key];
+    if (!entry) throw new Error("该目录与角色没有已登记线程，无法保存摘要");
+    map[key] = { ...entry, summary: String(text ?? ""), summaryAt: Date.now() };
+    save(map);
+    return true;
+  }
+
+  /** 取出并清除摘要（消费即失效——一个摘要只应注入一次）。 */
+  function takeSummary(siteId, root, role = "code") {
+    const map = load();
+    const key = threadKey(siteId, root, role);
+    const entry = map[key];
+    const summary = entry?.summary;
+    if (typeof summary !== "string" || !summary) return null;
+    delete entry.summary;
+    delete entry.summaryAt;
+    save(map);
+    return summary;
+  }
+
+  return { getThread, saveThread, clearThread, saveSummary, takeSummary };
 }
 
 const defaultStore = createThreadStore();
 export const getThread = defaultStore.getThread;
 export const saveThread = defaultStore.saveThread;
 export const clearThread = defaultStore.clearThread;
+export const saveSummary = defaultStore.saveSummary;
+export const takeSummary = defaultStore.takeSummary;

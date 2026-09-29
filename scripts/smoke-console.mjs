@@ -49,7 +49,7 @@ try {
   ({ context } = await launchBrowser({ headless: true, profileDir }));
   const page = await context.newPage();
   await page.goto(app.url);
-  await page.getByRole("heading", { name: "让网页导师读懂你的项目" }).waitFor();
+  await page.getByRole("heading", { name: "让网页聊天使用你的本地工具" }).waitFor();
   await page.locator("#root").fill(process.cwd());
   await page.locator("#site").selectOption("chatgpt");
   await page.locator("#role").selectOption("text");

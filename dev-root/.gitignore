@@ -1,0 +1,3 @@
+# dev-root 内层 git 仓库（工具测试聊天的机器本地 fixture）的忽略规则
+scratch/
+.playwright-mcp/

@@ -28,5 +28,5 @@ test("mock 端口被占用时自动回退到空闲端口", async (t) => {
   assert.match(url, /^http:\/\/127\.0\.0\.1:\d+\/$/);
   const response = await fetch(url);
   assert.equal(response.status, 200);
-  assert.match(await response.text(), /Mock Chat（file-tool 自测）/);
+  assert.match(await response.text(), /Mock Chat（Chat2Local 自测）/);
 });

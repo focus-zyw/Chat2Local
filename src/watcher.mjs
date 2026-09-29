@@ -7,8 +7,7 @@
  *   - 文本不变且 !busy 持续 stableMs → 视为一条"新回复"
  *   - 有动作块 → 逐个执行（root 沙箱内）→ driver.deliver(feedPayload) 回填
  *   - 无动作块（纯讲解）→ 只通知 onReply，不打扰对话
- *
- * 回填消息是"用户角色"，不会再次触发 watcher（snapshot 只读 assistant 气泡）。
+ *   - 无动作块但含 ```summary 围栏（压缩续接请求的回复）→ 通知 onSummary
  */
 
 import fs from "node:fs";
@@ -22,6 +21,27 @@ import { replyFingerprint } from "./watch-checkpoint.mjs";
 // 追踪文件：watcher 每次快照的状态流水。它"看不见"页面时（busy 卡死、
 // 选择器失效、用户聊错窗口），从这里能直接看到它实际看到的东西。
 const TRACE_FILE = path.join(os.homedir(), ".file-tool", "watch-trace.txt");
+
+// 只展示这些固定字段名；MCP 入参值与其他字段名均可能包含凭据。
+const MCP_LOG_ARG_KEYS = ["url", "element", "target", "function"];
+
+/** 提取 ```summary 围栏内容（压缩续接请求的回复形态）；无则返回 null。
+ * 只认 summary 语言标签的完整围栏，正文其余部分忽略。 */
+function extractSummaryFence(text) {
+  const match = String(text ?? "").match(/```summary\r?\n([\s\S]*?)```/i);
+  const body = match?.[1]?.trim();
+  return body || null;
+}
+
+/** MCP 动作日志只记录参数形状，本地动作仍只记录 op+path。 */
+function actionFragment(action) {  if (action?.op !== "mcp") return "";
+  const args = action.args;
+  if (!args || typeof args !== "object") return "参数形状未知；参数值已省略";
+  const knownKeys = MCP_LOG_ARG_KEYS.filter((key) => Object.hasOwn(args, key));
+  const otherCount = Math.max(0, Object.keys(args).length - knownKeys.length);
+  const other = otherCount ? `，另 ${otherCount} 个字段名已省略` : "";
+  return `参数键=[${knownKeys.join(",")}]${other}；参数值已省略`;
+}
 
 function appendTrace(line) {
   try {
@@ -97,6 +117,7 @@ export async function startWatcher({
   feedRetryMs = 5000,
   log = () => {},
   onReply = () => {},
+  onSummary = null,
   checkpoint = null,
   onFatal = () => {},
   traceSink = appendTrace,
@@ -128,6 +149,13 @@ export async function startWatcher({
   let lastWakeSig = ""; // 最近一次唤醒报告的签名（对应 agedMs 传递给 tracker）
   let lastWakeAgoMs = 0;
 
+  const signal = () => {
+    stopped = true;
+    paused = false;
+    for (const resolve of pauseWaiters.splice(0)) resolve();
+    wakePausedLoop?.();
+  };
+
   const deliverSafely = async (text) => {
     try {
       return await driver.deliver(text);
@@ -140,7 +168,20 @@ export async function startWatcher({
     const message = `网页回填结果不确定（${error || "未知原因"}）；已停止自动执行。请检查原聊天，重启后人工确认，不会自动重发。`;
     log(message);
     try { onFatal(message); } catch { /* 状态通知失败仍须停止 */ }
-    stopped = true;
+    signal();
+  };
+
+  // mcp 等动作返回"结果不明"（已发出、结果未知）时：停止本批次与后续自动
+  // 执行，不回填（回填会让模型以为批次完成并继续），断点保留在 executing
+  // 等人工核对。这是结果不明与普通失败的语义分界。
+  const haltForUnknownOutcome = (action, result) => {
+    const target = `${action.op} ${action.tool ?? action.path ?? ""}`.trim();
+    const message =
+      `动作 ${target} ${actionFragment(action)} 已发出但结果不明（${result?.text || "未知原因"}）；` +
+      `已停止本批次后续动作与自动回填。请核对原聊天与本地实际状态，重启后人工确认，不会自动重试或重放。`;
+    log(message);
+    try { onFatal(message); } catch { /* 状态通知失败仍须停止 */ }
+    signal();
   };
 
   const persist = (record) => {
@@ -150,7 +191,7 @@ export async function startWatcher({
       const message = `watch 断点保存失败，已停止自动执行：${err?.message || err}`;
       log(message);
       try { onFatal(message); } catch { /* 状态通知失败仍须停止 */ }
-      stopped = true;
+      signal();
       throw err;
     }
   };
@@ -186,6 +227,7 @@ export async function startWatcher({
           continue;
         }
         const snap = await driver.snapshot();
+        if (stopped) break;
         // 追踪流水只记状态与变化标记；正文仅在内存比较，不写入诊断文件。
         // 每 10s 强制心跳，事后仍能定位站点选择器或生成状态失效。
         const traceSig = `${snap.busy ? 1 : 0}:${sigOf(snap.text)}`;
@@ -216,7 +258,7 @@ export async function startWatcher({
         ) {
           reminded = true;
           log(
-            "提醒：页面内容已 2 分钟无变化。请确认①你是在标题带〔file-tool〕的浏览器窗口里聊天；②终端保持运行（关掉终端 = 停止旁观执行）。"
+            "提醒：页面内容已 2 分钟无变化。请确认①你是在标题带〔Chat2Local〕的浏览器窗口里聊天；②终端保持运行（关掉终端 = 停止旁观执行）。"
           );
         }
         if (!feeding) {
@@ -230,6 +272,7 @@ export async function startWatcher({
             const actions = parsed.actions;
             if (actions.length > 0) {
               feeding = true;
+              let outcomeUnknown = false;
               try {
                 const chosen = actions.slice(0, maxActionsPerFeed);
                 persist({ phase: "executing", replyId, actionCount: chosen.length });
@@ -239,6 +282,7 @@ export async function startWatcher({
                 log(`检测到 ${chosen.length} 个动作，执行中…`);
                 const results = [];
                 for (const [index, action] of chosen.entries()) {
+                  if (stopped) break;
                   persist({ phase: "executing", replyId, actionIndex: index + 1, actionCount: chosen.length });
                   let result;
                   try {
@@ -247,36 +291,49 @@ export async function startWatcher({
                     result = { ok: false, error: err?.message || "exec-failed", text: err?.message || "" };
                   }
                   results.push({ action, result });
-                  log(
-                    `  ${action.op} ${action.path ?? ""} → ${result.ok ? "ok" : `失败 ${result.error || ""}`}`
-                  );
-                }
-                feedCount += 1;
-                log(`结果回填到网页（第 ${feedCount} 次）…`);
-                const feed = feedPayload(results, feedCount, role);
-                persist({ phase: "delivering", replyId, actionCount: chosen.length });
-                const fed = await deliverSafely(feed);
-                if (!fed.ok) {
-                  if (fed.retryable === false) haltForUnknownDelivery(fed.error);
-                  else {
-                    pendingFeed = feed;
-                    pendingReplyId = replyId;
-                    pendingActionCount = chosen.length;
-                    retryFeedAt = Date.now() + feedRetryMs;
-                    log(`回填失败：${fed.error || "unknown"}——已保留结果，将自动重试`);
+                  const head = [`  ${action.op}`, action.tool ?? action.path ?? "", actionFragment(action)]
+                    .filter((part) => part !== "")
+                    .join(" ");
+                  log(`${head} → ${result.ok ? "ok" : `失败 ${result.error || ""}`}`);
+                  if (result?.requiresConfirmation || result?.error === "mcp-outcome-unknown") {
+                    // 结果不明：不回填、不执行同批次后续动作，断点停在 executing 等人工核对
+                    outcomeUnknown = true;
+                    haltForUnknownOutcome(action, result);
+                    break;
                   }
-                } else {
-                  persist({ phase: "processed", replyId, actionCount: chosen.length });
-                  lastPersistedId = replyId;
-                  log(`结果回填成功（第 ${feedCount} 次）`);
+                }
+                if (!outcomeUnknown && !stopped) {
+                  feedCount += 1;
+                  log(`结果回填到网页（第 ${feedCount} 次）…`);
+                  const feed = feedPayload(results, feedCount, role);
+                  persist({ phase: "delivering", replyId, actionCount: chosen.length });
+                  const fed = await deliverSafely(feed);
+                  if (!fed.ok) {
+                    if (fed.retryable === false) haltForUnknownDelivery(fed.error);
+                    else {
+                      pendingFeed = feed;
+                      pendingReplyId = replyId;
+                      pendingActionCount = chosen.length;
+                      retryFeedAt = Date.now() + feedRetryMs;
+                      log(`回填失败：${fed.error || "unknown"}——已保留结果，将自动重试`);
+                    }
+                  } else {
+                    persist({ phase: "processed", replyId, actionCount: chosen.length });
+                    lastPersistedId = replyId;
+                    log(`结果回填成功（第 ${feedCount} 次）`);
+                  }
                 }
               } finally {
                 feeding = false;
               }
-            } else if (onReply) {
+            } else {
               persist({ phase: "processed", replyId });
               lastPersistedId = replyId;
-              onReply(text);
+              // 压缩续接：捕获 ```summary 围栏（compressPayload 的回复形态），
+              // 交给调用方确认保存；其余无动作回复走 onReply。
+              const summary = extractSummaryFence(text);
+              if (summary && onSummary) onSummary(summary);
+              else if (onReply) onReply(text);
             }
           }
         }
@@ -302,11 +359,11 @@ export async function startWatcher({
     }
   })();
 
+  // 非阻塞停止信号：禁止开始下一项动作/回填，但不等待在途动作结束。
+  // 收尾顺序（cli）：signal → 关 MCP（释放在途请求）→ await stop() → 关浏览器，
+  // 避免退出被在途工具调用拖到超时。
   const stop = async () => {
-    stopped = true;
-    paused = false;
-    for (const resolve of pauseWaiters.splice(0)) resolve();
-    wakePausedLoop?.();
+    signal();
     await loop;
   };
   stop.pause = async () => {
@@ -323,5 +380,7 @@ export async function startWatcher({
     wakePausedLoop?.();
   };
   stop.isPaused = () => paused && pauseAcknowledged;
+  stop.isStopped = () => stopped;
+  stop.signal = signal;
   return stop;
 }

@@ -1,20 +1,27 @@
 /**
  * watch（旁观执行）模式端到端自测：先在 mock 页发送 watch 专属开场白，
  * 再用 ?auto=1 模拟"用户已在网页上提问、导师回复带 host 动作块"，
- * 验证 watcher 发现动作、执行并自动回填。不需要账号。跑法：npm run smoke:watch
+ * 验证 watcher 发现动作、执行并自动回填。随后用 ?auto=mcp 验证
+ * 网页 → host 动作 → 本地 MCP server（只读跨目录搜索）→ 结果回填 的桥接。
+ * 不需要账号。跑法：npm run smoke:watch
  */
 
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { startMockServer, mockServerUrl } from "./mock-server.mjs";
 import { launchBrowser } from "../src/browser.mjs";
 import { createDriver } from "../src/page-driver.mjs";
 import { startWatcher } from "../src/watcher.mjs";
-import { watchIntroPayload } from "../src/protocol.mjs";
+import { watchIntroPayload, conversationIntroPayload } from "../src/protocol.mjs";
+import { runAction } from "../src/host-actions.mjs";
+import { createMcpClient } from "../src/mcp-client.mjs";
 import { createWatchCheckpointStore } from "../src/watch-checkpoint.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const DEMO_MCP_SERVER = fileURLToPath(new URL("../demo/mcp-search-server.mjs", import.meta.url));
 
 async function makeFixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "file-tool-watch-"));
@@ -24,11 +31,17 @@ async function makeFixture() {
   );
   await fs.mkdir(path.join(root, "src"), { recursive: true });
   await fs.writeFile(path.join(root, "src", "index.js"), "export default 1;\n");
-  return root;
+  // mcp 桥接场景：root1 与 root2 各放一个 MARKER 文件，
+  // 一次 search_files 调用应同时命中两处（内置 search 只有单 Host Root，做不到）
+  await fs.mkdir(path.join(root, "notes"), { recursive: true });
+  await fs.writeFile(path.join(root, "notes", "mcp.md"), "MARKER in root1\n");
+  const root2 = await fs.mkdtemp(path.join(os.tmpdir(), "file-tool-watch2-"));
+  await fs.writeFile(path.join(root2, "other.md"), "MARKER in root2\n");
+  return { root, root2 };
 }
 
 async function main() {
-  const fixture = await makeFixture();
+  const { root: fixture, root2 } = await makeFixture();
   const profileDir = await fs.mkdtemp(path.join(os.tmpdir(), "file-tool-watch-profile-"));
   const server = await startMockServer();
   const mockUrl = mockServerUrl(server);
@@ -50,6 +63,12 @@ async function main() {
       log,
     });
     await driver.markTab();
+    const watchedPage = context.pages().at(-1);
+    await watchedPage.evaluate(() => { document.title = "〔file-tool〕旧聊天"; });
+    await driver.markTab();
+    if ((await watchedPage.title()) !== "〔Chat2Local〕旧聊天") {
+      throw new Error("SMOKE-WATCH FAILED: 旧聊天窗口标记未更新为 Chat2Local");
+    }
     if ((await driver.probe()).state !== "healthy") {
       throw new Error("SMOKE-WATCH FAILED: 已打开 mock 网页却未检测到可用输入框");
     }
@@ -79,6 +98,90 @@ async function main() {
     if (!ok) throw new Error("SMOKE-WATCH FAILED: 20s 内未见回填后的讲解\n" + logs.join("\n"));
     if (checkpoint.read()?.phase !== "processed") throw new Error("SMOKE-WATCH FAILED: 动作完成后断点未落盘");
 
+    // ── mcp 桥接场景：?auto=mcp 回复带 {"op":"mcp",...}，经常驻 MCP client
+    // 桥接 demo server（授权 root1+root2 跨目录搜索）后回填，mock 断言两个
+    // 目录的命中都出现在回填里才回 MCP-FEED-OK ──
+    const mcpUrl = mockUrl + "?auto=mcp";
+    const mcpDriver = await createDriver({ context, siteId: "mock", siteUrl: mcpUrl, watchMs: 20000, log });
+    await mcpDriver.markTab();
+    const mcpCheckpoint = createWatchCheckpointStore(path.join(profileDir, "watch-checkpoints.json"))
+      .forThread("mock", fixture, mcpUrl);
+    const mcpClient = await createMcpClient(
+      { command: process.execPath, args: [DEMO_MCP_SERVER, fixture, root2], cwd: fixture },
+      { startupTimeoutMs: 15000 }
+    );
+    const listed = await mcpClient.listTools({ timeoutMs: 15000 });
+    if (!listed.ok || listed.tools.length === 0) {
+      await mcpClient.close();
+      throw new Error("SMOKE-WATCH FAILED: 常驻 MCP client 未取得工具目录\n" + (listed.text || ""));
+    }
+    const mcpStop = await startWatcher({
+      driver: mcpDriver,
+      root: fixture,
+      checkpoint: mcpCheckpoint,
+      intervalMs: 400,
+      stableMs: 800,
+      log: (m) => log(`[mcp] ${m}`),
+      execAction: (action, rootDir) =>
+        runAction(action, rootDir, { mcp: { client: mcpClient, allow: listed.tools.map((t) => t.name) } }),
+    });
+    let mcpOk = false;
+    let mcpSnap = { text: "" };
+    for (let i = 0; i < 60 && !mcpOk; i++) {
+      await sleep(500);
+      mcpSnap = await mcpDriver.snapshot();
+      if (mcpSnap.text.includes("MCP-FEED-OK")) mcpOk = true;
+    }
+    await mcpStop();
+    await mcpClient.close();
+    if (!mcpOk) throw new Error("SMOKE-WATCH FAILED: 30s 内未见 mcp 桥接回填\n" + mcpSnap.text + "\n" + logs.join("\n"));
+    if (mcpCheckpoint.read()?.phase !== "processed") throw new Error("SMOKE-WATCH FAILED: mcp 场景断点未落盘");
+    // mock 只在回填里同时看到 [R1]/[R2] 命中时才回 MCP-FEED-OK（否则 MCP-FEED-FAIL）
+
+    // ── task 角色场景：开场白只待命且零动作 → 显式任务 → 动作 → task 版
+    // 回填注记 → mock 输出 done 结论 + 证据（TASK-DONE）──
+    const taskUrl = mockUrl + "?task=1";
+    const taskDriver = await createDriver({ context, siteId: "mock", siteUrl: taskUrl, watchMs: 20000, log });
+    await taskDriver.markTab();
+    const taskCheckpointStore = createWatchCheckpointStore(path.join(profileDir, "watch-checkpoints.json"));
+    const taskCheckpoint = taskCheckpointStore.forThread("mock", fixture, taskUrl, "task");
+    const taskCodeCheckpoint = taskCheckpointStore.forThread("mock", fixture, taskUrl, "code");
+    const taskIntro = await taskDriver.send(conversationIntroPayload(fixture, "task", true));
+    if (!taskIntro.ok) throw new Error("SMOKE-WATCH FAILED: task 开场白发送失败：" + (taskIntro.error || ""));
+    if (!taskIntro.text.includes("TASK-READY") || taskIntro.text.includes("```host")) {
+      throw new Error("SMOKE-WATCH FAILED: task 开场白应只确认待命，不得主动调用工具\n" + taskIntro.text);
+    }
+    let taskActionCount = 0;
+    const taskStop = await startWatcher({
+      driver: taskDriver,
+      root: fixture,
+      role: "task",
+      checkpoint: taskCheckpoint,
+      execAction: async (action, rootDir) => {
+        taskActionCount += 1;
+        return runAction(action, rootDir);
+      },
+      intervalMs: 400,
+      stableMs: 800,
+      log: (m) => log(`[task] ${m}`),
+    });
+    await sleep(1200);
+    if (taskActionCount !== 0) throw new Error("SMOKE-WATCH FAILED: 明确任务送达前不得执行动作");
+    const taskRequest = await taskDriver.deliver("明确任务：读取 package.json，报告项目名并给出可验证证据。");
+    if (!taskRequest.ok) throw new Error("SMOKE-WATCH FAILED: task 明确任务发送失败：" + (taskRequest.error || ""));
+    let taskOk = false;
+    let taskSnap = { text: "" };
+    for (let i = 0; i < 60 && !taskOk; i++) {
+      await sleep(500);
+      taskSnap = await taskDriver.snapshot();
+      if (taskSnap.text.includes("TASK-DONE")) taskOk = true;
+    }
+    await taskStop();
+    if (!taskOk) throw new Error("SMOKE-WATCH FAILED: 30s 内未见 task 角色的 done 总结\n" + taskSnap.text + "\n" + logs.join("\n"));
+    if (taskSnap.text.includes("TASK-FAIL")) throw new Error("SMOKE-WATCH FAILED: task 回填缺少任务版续行注记\n" + taskSnap.text);
+    if (taskCheckpoint.read()?.phase !== "processed") throw new Error("SMOKE-WATCH FAILED: task 场景断点未落盘");
+    if (taskCodeCheckpoint.read() !== null) throw new Error("SMOKE-WATCH FAILED: task 场景污染了 code 角色断点键");
+
     // 诊断回归（脱敏故障样本）：细分原因映射必须与页面状态一致
     const healthy = await driver.diagnose();
     if (healthy.state !== "healthy") {
@@ -104,11 +207,14 @@ async function main() {
     if (probeScoped.cause !== "composer-miss" || !probeScoped.advice) {
       throw new Error(`SMOKE-WATCH FAILED: 收窄后的 probe 在 composer 变体应为 composer-miss，实际 ${probeScoped.cause || "—"}`);
     }
-    process.stdout.write("SMOKE-WATCH PASSED — 旁观执行模式全链路 OK（含诊断回归：healthy/hidden/selector-miss/probe-scope）\n");
+    process.stdout.write(
+      "SMOKE-WATCH PASSED — 旁观执行全链路 OK（诊断回归 + mcp 桥接 + task 角色连续执行到 done）\n"
+    );
   } finally {
     if (context) await context.close().catch(() => {});
     server.close();
     await fs.rm(fixture, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(root2, { recursive: true, force: true }).catch(() => {});
     await fs.rm(profileDir, { recursive: true, force: true }).catch(() => {});
   }
 }

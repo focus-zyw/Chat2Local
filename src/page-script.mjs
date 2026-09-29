@@ -365,8 +365,9 @@ export async function pageMain({ site, payload, watchMs, mode = "sendAndWait" })
     // 顺手重新打窗口标记：SPA（如 DeepSeek）会重设 document.title，
     // 只在 markTab 设一次会被冲掉
     try {
-      if (!document.title.includes("〔file-tool〕")) {
-        document.title = "〔file-tool〕" + document.title;
+      document.title = document.title.replace("〔file-tool〕", "〔Chat2Local〕");
+      if (!document.title.includes("〔Chat2Local〕")) {
+        document.title = "〔Chat2Local〕" + document.title;
       }
     } catch {
       /* 某些页面禁止改 title */

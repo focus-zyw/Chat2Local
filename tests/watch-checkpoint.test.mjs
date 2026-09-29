@@ -59,3 +59,15 @@ test("watch 断点：另一角色未确认时不能切换角色绕过核对", as
   code.acknowledge();
   assert.doesNotThrow(() => assertOtherRoleClear(store, "chatgpt", dir, "text"));
 });
+
+test("watch 断点：目录同步状态不明需原聊天人工确认", async (t) => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "file-tool-checkpoint-"));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const store = createWatchCheckpointStore(path.join(dir, "watch.json"));
+  const handle = store.forThread("deepseek", dir, "https://chat.deepseek.com/a/chat/s/original");
+  handle.write({ phase: "catalog-sync", replyId: "a".repeat(64) });
+  assert.equal(handle.read().phase, "catalog-sync");
+  assert.equal(store.forThread("deepseek", dir, "https://chat.deepseek.com/a/chat/s/other").read().phase, "mismatch-pending");
+  assert.equal(handle.acknowledge(), true);
+  assert.equal(handle.read().phase, "processed");
+});

@@ -139,3 +139,14 @@ test("stripActionBlocks: 空输入与纯正文直通", () => {
   assert.equal(stripActionBlocks(""), "");
   assert.equal(stripActionBlocks("讲解文本"), "讲解文本");
 });
+
+test("mcp 动作：host 围栏与裸 JSON 数组都能识别", () => {
+  const fenced = '我用 MCP 工具搜。\n```host\n[{"op":"mcp","tool":"search_files","args":{"query":"x"}}]\n```';
+  assert.deepEqual(extractActions(fenced).actions, [
+    { op: "mcp", tool: "search_files", args: { query: "x" } },
+  ]);
+  const bare = '先查一下：[{"op":"mcp","tool":"search_files","args":{"query":"y"}}]';
+  assert.deepEqual(extractActions(bare).actions, [
+    { op: "mcp", tool: "search_files", args: { query: "y" } },
+  ]);
+});
